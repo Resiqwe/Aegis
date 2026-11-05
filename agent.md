@@ -4,9 +4,9 @@ Přečti tento soubor jako první. Pak [`PLAN.md`](file:///c:/Users/resiq/Docume
 
 ## Projekt
 - Název: `test`
-- Cíl projektu: _(doplň jednou větou)_
-- Prostředí: Windows, Python venv `.\.venv\Scripts\python.exe`
-- Jazyk komunikace: česky
+- Cíl projektu: naučit se vytvářet neuronové sítě, hrát si s AI (Python, CUDA, PyTorch). Jde o učení a experimenty, ne o produkční kód.
+- Prostředí: Windows, GPU NVIDIA RTX 5070 Ti (16 GB), Python venv `.\.venv\Scripts\python.exe`
+- Jazyk komunikace: česky, srozumitelně pro začátečníka (krátce vysvětli, proč se co dělá)
 
 ## Kde navázat
 | Co | Kde |
