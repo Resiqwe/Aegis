@@ -13,3 +13,5 @@ node_modules/
 dist/
 build/
 
+dumps/
+tréninkový_log.txt
