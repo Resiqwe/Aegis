@@ -1,24 +1,27 @@
 # test
 
-Experimentální projekt: softwarové 4bitové CPU postavené z jednotlivých neuronů (Python, NumPy). Učení a experimenty, ne produkční kód.
+Experimentální projekt: z neuronů se staví logika, bloky a časem čip. Učení a experimenty, ne produkční kód. Jen NumPy.
 
-## Struktura
+## Aktuální linie (nová, čistá)
+| Soubor | Co to je |
+|---|---|
+| `perceptron.py` | mikro-knihovnička: `Perceptron`, hradla (`Gates`), `add`, `sub`, `SRLatch`. Samokontrola: `python perceptron.py` |
+| `brick.py` | "lego kostička": malá síť, která se naučí celý blok z pravdivostní tabulky a je ověřena vyčerpávajícím testem. Samokontrola: `python brick.py` |
+
+```python
+from perceptron import Perceptron, Gates, add
+from brick import Brick
+```
+
+## Starší linie (dědictví, jen pro referenci)
 | Složka | Obsah |
 |---|---|
-| `neuron/` | `neuron_node.py` (základní buňka, dumpy vah, audit, hash řetěz), `chain_runner.py` (řetězení buněk, L1 Transit Buffer) |
-| `cpu/` | stavba CPU: `cpu_step1_xor` až `cpu_step4_core`, `cpu_telemetry_probe`, `cpu_hardware_clock_core` (TuringNeuronCPU, hodiny, JZ/JNZ) |
-| `demos/` | programy nad CPU: Fibonacci, Gaussův součet, 8bitové ADC, telemetrie |
-| `tests/` | `test_torture_suite.py` (buňka, viz `METODIKA_TESTU.md`), `cpu_torture_suite.py` (CPU) |
-| `archiv/` | starý kód (`_historie/`, `turtle_*.py`), jen pro referenci |
+| `neuron/` | původní `neuron_node.py` (dumpy vah, hash řetěz, audit) a `chain_runner.py` |
+| `cpu/` | pokusy o CPU (step1-4, telemetrie, hodiny). Velká část je obyčejný Python (SUB, RAM, skoky) |
+| `demos/` | programy nad starým CPU. `cpu_fibonacci_long_run.py` je rozbitý, viz `archiv/` |
+| `tests/` | torture sady pro starou linii |
+| `archiv/` | úplně staré soubory (`_historie/`, `turtle_*.py`) |
 | `ukoly/` | zadání agentům (`SABLONA.md`) |
 | `dumps/`, `logs/` | generované výstupy, ignorované gitem |
 
-## Spouštění
-Z kořene projektu `test/`, vždy jako modul (balíčky):
-```
-.\.venv\Scripts\Activate.ps1
-python -m tests.test_torture_suite
-python -m tests.cpu_torture_suite
-python -m demos.cpu_fibonacci_long_run
-```
-Stav testů po přesunu struktury zatím neověřen.
+Starou linii spouštět z kořene jako moduly, např. `python -m tests.cpu_torture_suite`.
