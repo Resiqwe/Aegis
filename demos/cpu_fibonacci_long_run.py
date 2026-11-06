@@ -8,9 +8,8 @@ import os
 import sys
 import time
 
-sys.path.append(os.path.dirname(__file__))
-from cpu_telemetry_probe import HardwareLogicProbe
-from cpu_hardware_clock_core import TuringNeuronCPU
+from cpu.cpu_telemetry_probe import HardwareLogicProbe
+from cpu.cpu_hardware_clock_core import TuringNeuronCPU
 
 def run_fibonacci_long_run(limit_iterations: int = 6):
     print("\n" + "=" * 95)

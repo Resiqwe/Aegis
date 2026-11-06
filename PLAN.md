@@ -1,20 +1,25 @@
-# PLAN: sběr bodů (zatím NEimplementovat)
+# PLAN
 
-Postup: nápady se jen zapisují. Po povelu „sestav plán" se seřadí podle závislostí a po „schvaluju" se provedou najednou s jedním závěrečným hlášením.
+Postup: nápady se jen zapisují. Po povelu "sestav plán" se seřadí podle závislostí a po "schvaluju" se provedou najednou s jedním závěrečným hlášením.
 
 ## Cíl projektu
-Naučit se vytvářet neuronové sítě a hrát si s AI (Python, CUDA, PyTorch). Učení a experimenty, od jednoduchých věcí ke složitějším.
+Naučit se stavět výpočetní logiku z neuronů: od jedné buňky přes ALU a registry po CPU s hodinami a podmíněnými skoky.
 
-## Ověřený stav
-- `python run_all.py` projde celou trubku (trénink, dump, validace, analýza, zpětná kontrola uložených vah). Při chybě v kterémkoli kroku se zastaví s exit code 1 (ověřeno podstrčeným poškozeným dumpem).
-- Dump ukládá skutečné váhy (W jako čísla, bias a pravděpodobnosti v meta JSON). Staré neplatné dumpy jsou v `dumps/_stare_neplatne/`.
+## Hotovo (podle kódu, testy neověřeny)
+- [x] Základní buňka `neuron_node` s dumpy, hash řetězem, WORM a auditem
+- [x] Řetězení buněk (`chain_runner`)
+- [x] CPU step1-4 (XOR, ALU, registry, jádro), telemetrie, hodiny, Zero Flag, JZ/JNZ
+- [x] Demo programy (Fibonacci, Gauss, 8bit ADC)
+- [x] Přestavba na balíčky `neuron/ cpu/ demos/ tests/`
 
-## Nasbírané body
-1. [x] Nainstalovat PyTorch s CUDA do `.venv` a ověřit, že vidí GPU
-2. [x] První síť od nuly: jeden neuron a gradientní sestup (bez frameworku)
-3. [ ] Klasifikace číslic MNIST (malá síť, trénink na GPU)
+## Otevřené body (technické dluhy)
+1. [ ] Spustit a vyhodnotit obě testovací sady po přesunu
+2. [ ] Jednotný spouštěč (náhrada za dřívější `run_all.py`)
+3. [ ] Ověřit překryv `cpu_telemetry_probe` a `demos/cpu_system_telemetry`
+4. [ ] Rozhodnout o `torch` a `matplotlib` v `requirements.txt` (kód používá jen NumPy)
+5. [ ] Rozhodnout o osudu `archiv/` a starých `dumps/`
 
 ## Pravidla dávky
-- Krátká kontrola po každém kroku, ať se chyba nenese dál.
+- Krátká kontrola po každém kroku.
 - Jedno závěrečné hlášení s tabulkou skutečných čísel.
 - Mazání a změny gitu schvaluje člověk.

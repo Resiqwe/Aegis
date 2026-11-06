@@ -10,7 +10,7 @@ import numpy as np
 # ==============================================================================
 # 0. DISKOVÁ HYGIENA A SEPARACE ZÓN (Pilíř 3: dumps/ vs. logs/)
 # ==============================================================================
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 DUMP_DIR = BASE_DIR / "dumps"          # Výhradně stavové artefakty (.dat, _meta.json, HEAD.json)
 LOG_DIR = BASE_DIR / "logs"            # Výhradně kontinuální auditní proud (node_events.jsonl)
 DUMP_DIR.mkdir(parents=True, exist_ok=True)

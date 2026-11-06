@@ -12,12 +12,11 @@ import sys
 import time
 import numpy as np
 
-sys.path.append(os.path.dirname(__file__))
-import neuron_node as nn
-from cpu_step1_xor import run_step1_xor
-from cpu_step2_alu import NeuronALU
-from cpu_step3_registers import NeuronSRLatch, NeuronRegister
-from cpu_step4_core import SoftNeuronCPU
+from neuron import neuron_node as nn
+from cpu.cpu_step1_xor import run_step1_xor
+from cpu.cpu_step2_alu import NeuronALU
+from cpu.cpu_step3_registers import NeuronSRLatch, NeuronRegister
+from cpu.cpu_step4_core import SoftNeuronCPU
 
 class CPUTortureSuite:
     def __init__(self):

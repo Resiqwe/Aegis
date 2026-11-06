@@ -21,9 +21,9 @@ from pathlib import Path
 
 import numpy as np
 
-import neuron_node as nn
+from neuron import neuron_node as nn
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 DUMP_DIR = nn.DUMP_DIR
 LOG_DIR = nn.LOG_DIR
 BACKUP_DUMPS = BASE_DIR / "_dumps_backup_during_test"
@@ -93,7 +93,7 @@ class TestRunner:
 def smoke_s0_subprocess_cli():
     clean_zones()
     proc = subprocess.run(
-        [sys.executable, "-X", "utf8", str(BASE_DIR / "neuron_node.py")],
+        [sys.executable, "-X", "utf8", str(BASE_DIR / "neuron" / "neuron_node.py")],
         capture_output=True, text=True, encoding="utf-8", cwd=BASE_DIR
     )
     assert proc.returncode == 0, f"Subprocess selhal ({proc.returncode}): {proc.stderr}"

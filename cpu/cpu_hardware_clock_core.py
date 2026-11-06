@@ -9,10 +9,9 @@ import sys
 import time
 import numpy as np
 
-sys.path.append(os.path.dirname(__file__))
-import neuron_node as nn
-from cpu_telemetry_probe import HardwareLogicProbe, ProbedNeuronALU
-from cpu_step3_registers import NeuronRegister
+from neuron import neuron_node as nn
+from cpu.cpu_telemetry_probe import HardwareLogicProbe, ProbedNeuronALU
+from cpu.cpu_step3_registers import NeuronRegister
 
 class ClockGenerator:
     """

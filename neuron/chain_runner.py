@@ -11,9 +11,9 @@ import json
 import numpy as np
 from pathlib import Path
 
-import neuron_node as nn
+from neuron import neuron_node as nn
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 DUMP_DIR = nn.DUMP_DIR
 LOG_DIR = nn.LOG_DIR
 

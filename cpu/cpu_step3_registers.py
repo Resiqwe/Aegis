@@ -18,8 +18,7 @@ import os
 import sys
 import numpy as np
 
-sys.path.append(os.path.dirname(__file__))
-import neuron_node as nn
+from neuron import neuron_node as nn
 
 class NeuronSRLatch:
     """

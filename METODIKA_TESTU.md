@@ -1,7 +1,7 @@
 # Metodika testování buňky (`neuron_node.py`)
 
-Spouštěč testovací sady: [`test_torture_suite.py`](file:///c:/Users/resiq/Documents/projekty/pokec/test/test_torture_suite.py)  
-Testovaný objekt (černá skříňka – do jejího kódu se během testů nesahá): [`neuron_node.py`](file:///c:/Users/resiq/Documents/projekty/pokec/test/neuron_node.py)
+Spouštěč testovací sady: [`test_torture_suite.py`](file:///c:/Users/resiq/Documents/projekty/pokec/test/tests/test_torture_suite.py)  
+Testovaný objekt (černá skříňka – do jejího kódu se během testů nesahá): [`neuron_node.py`](file:///c:/Users/resiq/Documents/projekty/pokec/test/neuron/neuron_node.py)
 
 ---
 

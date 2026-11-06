@@ -4,8 +4,8 @@ Přečti tento soubor jako první. Pak [`PLAN.md`](file:///c:/Users/resiq/Docume
 
 ## Projekt
 - Název: `test`
-- Cíl projektu: naučit se vytvářet neuronové sítě, hrát si s AI (Python, CUDA, PyTorch). Jde o učení a experimenty, ne o produkční kód.
-- Prostředí: Windows, GPU NVIDIA RTX 5070 Ti (16 GB), Python venv `.\.venv\Scripts\python.exe`
+- Cíl projektu: softwarové 4bitové CPU postavené z neuronů (NumPy), učení a experimenty, ne produkční kód. Struktura a spouštění: [`README.md`](file:///c:/Users/resiq/Documents/projekty/pokec/test/README.md).
+- Prostředí: Windows, Python venv `.\.venv\Scripts\python.exe`. Spouštět z kořene jako moduly, např. `python -m tests.test_torture_suite`.
 - Jazyk komunikace: česky, srozumitelně pro začátečníka (krátce vysvětli, proč se co dělá)
 
 ## Kde navázat
