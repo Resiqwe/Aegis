@@ -1,0 +1,9 @@
+﻿{
+    "updated_us": 1793931722947774,
+    "run_id": 2,
+    "head_meta_file": "dump_run_2_1793931722947774_meta.json",
+    "head_weights_file": "dump_run_2_1793931722947774_weights.dat",
+    "weights_hash": "53b17acfdbfc9eca0247ff0ae7e031e31406359692b41d628226b1b076d47afc",
+    "total_epochs": 500,
+    "final_loss": 3.5086853605388185e-05
+}

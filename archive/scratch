@@ -1,0 +1,74 @@
+import os
+import sys
+import time
+
+os.environ['SDL_VIDEODRIVER'] = 'dummy'
+sys.path.insert(0, 'c:/Users/resiq/Documents/projekty/pokec/test')
+
+import tactical_hud
+import pygame
+pygame.init()
+
+print("=" * 75)
+print("CYBER-TACTICS // FINÁLNÍ OVĚŘOVACÍ PROTOKOL TELEMETRIE RYCHLOSTÍ")
+print("=" * 75)
+
+hud = tactical_hud.OptimizedTacticalHUD()
+# Zahřátí GPU/PyTorch a paměti
+for _ in range(10):
+    hud.engine.step(1.0 / 60.0)
+
+test_durations_wall = 2.0  # 2.0 sekundy reálného času na každý preset
+presets = [0.5, 1.0, 2.0, 4.0]
+results = []
+
+for idx, target_spd in enumerate(presets):
+    hud.speed_idx = idx
+    state = hud.engine.get_battle_state_snapshot()
+    unit_info = hud.engine.inspect_unit(hud.selected_unit)
+
+    t_wall_start = time.perf_counter()
+    sim_time_start = hud.engine.operation_time_sec
+    hud._last_sim_time = t_wall_start
+    frames_rendered = 0
+
+    while True:
+        now = time.perf_counter()
+        if now - t_wall_start >= test_durations_wall:
+            break
+
+        # dt_hud odpovídající reálnému času mezi snímky
+        dt_hud = min(0.08, now - hud._last_sim_time)
+        hud._last_sim_time = now
+
+        # Čistá neomezená implementace přesně jako v tactical_hud.py:
+        spd = hud.speed_presets[hud.speed_idx]
+        step_dt = dt_hud * spd
+        hud.engine.step(step_dt)
+
+        # Plné vykreslení obrazu (kompletní zatížení rozhraní)
+        hud.render_all(state, unit_info)
+        frames_rendered += 1
+
+        time.sleep(0.005)
+
+    t_wall_elapsed = time.perf_counter() - t_wall_start
+    sim_time_elapsed = hud.engine.operation_time_sec - sim_time_start
+    actual_multiplier = sim_time_elapsed / t_wall_elapsed
+    avg_fps = frames_rendered / t_wall_elapsed
+
+    results.append({
+        "target": target_spd,
+        "wall_sec": t_wall_elapsed,
+        "sim_sec": sim_time_elapsed,
+        "multiplier": actual_multiplier,
+        "fps": avg_fps,
+    })
+
+print(f"{'PRESET':<8} | {'STOPKY (REAL)':<15} | {'BITVA (SIM)':<15} | {'ZRYCHLENÍ (TELEMETRIE)':<24} | {'FPS'}")
+print("-" * 75)
+for r in results:
+    mult_str = f"{r['multiplier']:.2f}x"
+    status = "OK [POTVRZENO]" if abs(r['multiplier'] - r['target']) < 0.25 else "CHYBA"
+    print(f"{r['target']:>4.1f}x   | {r['wall_sec']:>11.2f} s   | {r['sim_sec']:>11.2f} s   | {mult_str:>14}  ({status:<13}) | {r['fps']:>5.1f}")
+print("=" * 75)

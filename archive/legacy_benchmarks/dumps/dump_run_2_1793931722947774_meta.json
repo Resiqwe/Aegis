@@ -1,0 +1,20 @@
+﻿{
+    "run_id": 2,
+    "timestamp_us": 1793931722947774,
+    "param_count": 4,
+    "epochs": 500,
+    "total_epochs": 500,
+    "elapsed_ms": 2.382,
+    "stop_reason": "EARLY_EXIT",
+    "final_loss": 3.5086853605388185e-05,
+    "bce_loss": 0.005878512914117403,
+    "probabilities": [
+        0.0068529604955978405,
+        0.006533953181740901,
+        0.9952200799556409,
+        0.9947232427518712
+    ],
+    "parent_weights_hash": "eedb62e65e8672205b02d0ec075598599d625cf6f5ccfa68b9bf22167db2d3f2",
+    "weights_hash": "53b17acfdbfc9eca0247ff0ae7e031e31406359692b41d628226b1b076d47afc",
+    "status": "OK"
+}
