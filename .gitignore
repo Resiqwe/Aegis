@@ -1,19 +1,33 @@
-﻿.venv/
+# ── Source package tracking (explicitly allowed - was previously blocked) ────────────
+# These are the engineered modules we version-control
+src/
+engine/
+
+# ── Data & runtime artifacts (keep ignored) ───────────────────────
+# Telemetry outputs from multiple campaign runs
+telemetry/
+archiv/
+*.csv
+*.parquet
+*.jsonl
+*.png
+*.jpg
+*.svg
+temp.txt
+*.pt
+run_headless.py.log
+
+# ── Build / IDE artifacts ────────────────────────────────────────
+.venv/
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
 *.safetensors
-*.pt
 *.pth
 *.bin
 .env
-.idea/
-.vscode/
+.node_modules/
+idea/
+vscode/
 node_modules/
 dist/
 build/
-
-dumps/
-tréninkový_log.txt
-
-logs/
