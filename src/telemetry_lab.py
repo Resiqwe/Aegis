@@ -151,20 +151,26 @@ class TelemetryLab:
         W2 = self.snapshot_data.get("brains_W2_full")
         if W2 is None:
             W2 = self.snapshot_data.get("brains_W2")
+        W3 = self.snapshot_data.get("brains_W3_full")
 
         if W1 is None or W2 is None:
             return {}
 
-        # W1: (N, 10, 24), W2: (N, 24, 4)
         W1 = W1.float()
         W2 = W2.float()
         N = W1.shape[0]
 
-        # Efektivní spojovací síla: Saliency(s, a) = mean_units( |W1[:, s, :] @ W2[:, :, a]| )
-        # Matice (10, 4): významnost každého senzoru pro každou akci
         with torch.no_grad():
-            eff_matrix = torch.bmm(torch.abs(W1), torch.abs(W2)) # (N, 10, 4)
-            avg_importance = torch.mean(eff_matrix, dim=0).numpy() # (10, 4)
+            if W3 is not None:
+                W3 = W3.float()
+                # 3-vrstvý MLP: (N, 14, 64) @ (N, 64, 64) @ (N, 64, 7) -> (N, 14, 7)
+                eff_matrix = torch.bmm(torch.bmm(torch.abs(W1), torch.abs(W2)), torch.abs(W3))
+                var_W3 = float(torch.var(W3).item())
+            else:
+                eff_matrix = torch.bmm(torch.abs(W1), torch.abs(W2))
+                var_W3 = 0.0
+
+            avg_importance = torch.mean(eff_matrix, dim=0).numpy()
 
             # Celková důležitost senzorů přes všechny akce
             sensor_totals = np.sum(avg_importance, axis=1)
@@ -173,7 +179,7 @@ class TelemetryLab:
             # Genetická diverzita (rozptyl vah napříč populací)
             var_W1 = float(torch.var(W1).item())
             var_W2 = float(torch.var(W2).item())
-            diversity_index = (var_W1 + var_W2) * 0.5
+            diversity_index = (var_W1 + var_W2 + var_W3) / (3.0 if W3 is not None else 2.0)
 
         return {
             "importance_matrix": avg_importance,

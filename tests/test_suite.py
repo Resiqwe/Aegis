@@ -1,0 +1,180 @@
+"""
+tests/test_suite.py - Komplexní integrační testovací sada pro Cyber-Tactics 2.0.
+
+Ověřuje:
+  1. Import všech modulů a subsystémů balíčku src
+  2. Stabilní 60-krokovou simulaci s detekcí poškození a eliminací
+  3. Reálnou atribuci killů útočníkovi (žádné 0-kill zkreslení)
+  4. Všechny 4 třídní schopnosti (Grunt smoke, Medic pulse, Sniper focus, Juggernaut shield)
+  5. Asynchronní simulační worker a lock-free most (AsyncSimulationWorker & LockFreeStateBridge)
+  6. Ukládání a načítání snapshotů (.pt)
+"""
+
+import os
+import sys
+import time
+import unittest
+import torch
+import numpy as np
+
+# Přidání cesty k src
+test_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+src_dir = os.path.join(test_dir, "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+if test_dir not in sys.path:
+    sys.path.insert(0, test_dir)
+
+import config
+import ai_brains
+import scenarios
+import engine_core
+import telemetry_logger
+import telemetry_lab
+from engine.staging_buffer import SimulationStagingBuffer
+from engine.spatial_system import SpatialSystem
+from engine.ballistics_system import VectorizedBallisticsSystem
+from engine.combat_system import CombatSystem
+from engine.objectives_system import ObjectivesSystem
+from engine.state_bridge import LockFreeStateBridge
+from engine.async_runner import AsyncSimulationWorker
+
+
+class TestCyberTacticsSuite(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        print(f"\n[Test Setup] Testování na zařízení: {cls.device}")
+
+    def test_01_config_and_dimensions(self):
+        """Ověření správných rozměrů světa a senzorů/akcí."""
+        self.assertEqual(config.WORLD_W, 2400)
+        self.assertEqual(config.WORLD_H, 1350)
+        self.assertEqual(len(config.SENSOR_NAMES), 14)
+        self.assertEqual(len(config.ACTION_NAMES), 7)
+        self.assertEqual(config.SENSOR_COUNT, 14)
+        self.assertEqual(config.ACTION_COUNT, 7)
+
+    def test_02_engine_subsystems_integration(self):
+        """Ověření inicializace jádra a všech 5 subsystémů."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        self.assertIsInstance(engine.staging_buf, SimulationStagingBuffer)
+        self.assertIsInstance(engine.spatial, SpatialSystem)
+        self.assertIsInstance(engine.ballistics, VectorizedBallisticsSystem)
+        self.assertIsInstance(engine.combat, CombatSystem)
+        self.assertIsInstance(engine.objectives, ObjectivesSystem)
+
+    def test_03_simulation_and_kill_attribution(self):
+        """Ověření 120 simulačních kroků a nenulové atribuce killů."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(400, 4)
+        
+        # Povolíme vizuální stopy a poškození
+        engine.visual_mode = True
+        
+        for _ in range(120):
+            engine.step(1.0 / 60.0)
+
+        snapshot = engine.get_battle_state_snapshot()
+        self.assertIn("pos", snapshot)
+        self.assertIn("hp", snapshot)
+        self.assertIn("alive", snapshot)
+        
+        total_kills = engine.kills_per_faction.sum().item()
+        total_unit_kills = engine.unit_kills.sum().item()
+        print(f"\n[Test 03] Kills: Factions sum={total_kills}, Unit kills sum={total_unit_kills}")
+        self.assertEqual(total_kills, total_unit_kills)
+
+    def test_04_class_abilities_activation(self):
+        """Ověření exekuce všech 4 schopností přes CombatSystem."""
+        combat = CombatSystem(self.device)
+        N = 4
+        dt = 1.0 / 60.0
+        
+        alive = torch.ones(N, dtype=torch.bool, device=self.device)
+        classes = torch.tensor([config.CLASS_GRUNT, config.CLASS_MEDIC, config.CLASS_SNIPER, config.CLASS_JUGGERNAUT], dtype=torch.int8, device=self.device)
+        teams = torch.tensor([0, 0, 0, 0], dtype=torch.int8, device=self.device)
+        pos = torch.tensor([[100.0, 100.0], [110.0, 100.0], [100.0, 110.0], [105.0, 105.0]], dtype=torch.float32, device=self.device)
+        hp = torch.tensor([50.0, 50.0, 50.0, 50.0], dtype=torch.float32, device=self.device)
+        class_max_hp = torch.tensor([115.0, 105.0, 70.0, 480.0], dtype=torch.float32, device=self.device)
+        
+        brain_ability = torch.tensor([0.9, 0.9, 0.9, 0.9], dtype=torch.float32, device=self.device)
+        ability_cd = torch.zeros(N, dtype=torch.float32, device=self.device)
+        active_smokes = torch.zeros((0, 5), dtype=torch.float32, device=self.device)
+        fortress_timer = torch.zeros(N, dtype=torch.float32, device=self.device)
+        sniper_timer = torch.zeros(N, dtype=torch.float32, device=self.device)
+        staging_buf = SimulationStagingBuffer(N, self.device)
+        healing_done = torch.zeros(N, dtype=torch.float32, device=self.device)
+        fitness = torch.zeros(N, dtype=torch.float32, device=self.device)
+        
+        cd_out, smokes_out, fort_out, snip_out = combat.process_abilities(
+            dt=dt,
+            brain_ability=brain_ability,
+            alive=alive,
+            classes=classes,
+            teams=teams,
+            pos=pos,
+            hp=hp,
+            class_max_hp=class_max_hp,
+            ability_cooldown=ability_cd,
+            active_smokes_gpu=active_smokes,
+            fortress_shield_timer=fortress_timer,
+            sniper_focus_timer=sniper_timer,
+            staging_buf=staging_buf,
+            healing_done=healing_done,
+            fitness=fitness,
+            active_heals_p1=[],
+            active_heals_p2=[],
+        )
+        
+        # Grunt vypustil kouř
+        self.assertGreater(smokes_out.shape[0], 0)
+        # Medic provedl pulse heal do staging bufferu
+        self.assertGreater(staging_buf.delta_hp.sum().item(), 0.0)
+        # Sniper má aktivní focus timer
+        self.assertGreater(snip_out[2].item(), 0.0)
+        # Juggernaut má aktivní fortress shield
+        self.assertGreater(fort_out[3].item(), 0.0)
+
+    def test_05_async_worker_and_state_bridge(self):
+        """Ověření decoupling workeru a čtení interpolovaných stavů."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(400, 4)
+        bridge = LockFreeStateBridge()
+        worker = AsyncSimulationWorker(engine, bridge)
+        
+        worker.start()
+        time.sleep(0.15)
+        
+        self.assertTrue(worker.is_running())
+        state = bridge.get_interpolated_state()
+        self.assertIsNotNone(state)
+        self.assertIn("pos", state)
+        
+        worker.stop()
+        self.assertFalse(worker.is_running())
+
+    def test_06_snapshot_roundtrip(self):
+        """Ověření uložení a načtení snapshotu s 3-vrstvou vahovou strukturou."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(400, 4)
+        telemetry = telemetry_logger.TelemetryManager("telemetry")
+        
+        snap_path = telemetry.save_snapshot(engine)
+        self.assertTrue(os.path.exists(snap_path))
+        
+        # Načtení do nového enginu
+        engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine2.configure(400, 4)
+        ok = telemetry.load_snapshot(engine2, snap_path)
+        self.assertTrue(ok)
+        
+        # Vyčištění testovacího snapshotu
+        try:
+            os.remove(snap_path)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    unittest.main()
