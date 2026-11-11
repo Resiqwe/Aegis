@@ -1,8 +1,5 @@
-# ── Source package tracking (explicitly allowed - was previously blocked) ────────────
-# These are the engineered modules we version-control
-src/
-engine/
-
+# ── Source package tracking ───────────────────────────────────────
+# Do NOT ignore src/
 # ── Data & runtime artifacts (keep ignored) ───────────────────────
 # Telemetry outputs from multiple campaign runs
 telemetry/
