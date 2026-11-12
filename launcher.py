@@ -339,7 +339,7 @@ class CyberTacticsLauncher:
             self.set_status(f"Uložen stav: {os.path.basename(snap_path)}", ACCENT_GREEN)
 
     def step_simulation_background(self):
-        if not self.sim_active or self.sim_paused:
+        if not self.sim_active or self.sim_paused or getattr(self, "_preview_open", False):
             self._last_bg_time = time.perf_counter()
             return
 
@@ -386,10 +386,13 @@ class CyberTacticsLauncher:
             self.sim_tps_timer = now
 
     def open_live_preview(self):
+        if getattr(self, "_preview_open", False):
+            return
         if not self.sim_active:
             self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot)
         if not self.hot_reload_modules():
             return
+        self._preview_open = True
         try:
             hud_app = tactical_hud.OptimizedTacticalHUD(
                 existing_screen=self.screen,
@@ -407,6 +410,11 @@ class CyberTacticsLauncher:
             self.set_status("Návrat z bojiště. Simulace plynule pokračuje v doku.", ACCENT_GREEN)
         except Exception as e:
             self.set_status(f"Chyba při otevření bojiště: {e}", ACCENT_ROSE)
+        finally:
+            self._preview_open = False
+            # Vyčištění fronty kliknutí, aby zběsilé kliky z HUDu nepropadly do Launcheru
+            pygame.event.clear(pygame.MOUSEBUTTONUP)
+            pygame.event.clear(pygame.MOUSEBUTTONDOWN)
 
     def draw_card(self, rect: pygame.Rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8):
         pygame.draw.rect(self.screen, bg, rect, border_radius=radius)

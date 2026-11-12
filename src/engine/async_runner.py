@@ -58,8 +58,8 @@ class AsyncSimulationWorker:
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="Aegis-SimWorker")
         self._thread.start()
 
-    def stop(self, join_timeout: float = 1.0):
-        """Ukončí simulační vlákno."""
+    def stop(self, join_timeout: float = 3.0):
+        """Ukončí simulační vlákno s garantovaným joinem."""
         self._stop_requested.set()
         self._running = False
         if self._thread is not None and self._thread.is_alive():
@@ -118,7 +118,7 @@ class AsyncSimulationWorker:
                 steps_done = 0
                 max_substeps = max(1, int(round(self.speed_multiplier * 4)))
 
-                while accumulator >= sim_dt and steps_done < max_substeps:
+                while accumulator >= sim_dt and steps_done < max_substeps and not self._stop_requested.is_set():
                     t_step0 = time.perf_counter()
                     
                     # 1. Krok jádra

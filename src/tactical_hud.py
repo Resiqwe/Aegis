@@ -540,8 +540,9 @@ class OptimizedTacticalHUD:
         self.screen.blit(self.f_tiny.render(t2, True, ACCENT_AMBER), (10, 23))
 
         fps_val = getattr(self, "measured_fps", 60.0)
+        render_ms = getattr(self, "render_time_ms", 5.0)
         sim_ms = getattr(self, "sim_time_ms", 1.0)
-        t_perf = f"FPS:{fps_val:4.0f} | {sim_ms:3.1f}ms"
+        t_perf = f"FPS:{fps_val:3.0f} ({render_ms:3.1f}ms) | SIM:{sim_ms:3.1f}ms"
         self.screen.blit(self.f_tiny.render(t_perf, True, ACCENT_GREEN), (10, 38))
 
         # 2. Pravá zóna: Rychlosti, Kamera a Play/Pause

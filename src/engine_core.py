@@ -16,6 +16,7 @@ Klíčové metodické a technické vlastnosti:
 """
 
 import math
+import threading
 import numpy as np
 import torch
 
@@ -118,6 +119,8 @@ class RealisticBattleEngine:
         self._sensor_buf = None
         # Zero-Trust Staging Buffer pro oddělení výpočtů od zápisů
         self.staging_buf = SimulationStagingBuffer(self.N, self.device)
+        # Thread-safe reentrantní zámek chránící stav tenzorů před souběžným zápisem
+        self._engine_lock = threading.RLock()
 
     def _reset_gates(self):
         gates = getattr(self.scenario, "gates", [])
@@ -142,23 +145,26 @@ class RealisticBattleEngine:
         self.flow_field_gpu = torch.tensor(field_np, dtype=torch.float32, device=self.device)
 
     def switch_scenario(self, scenario_idx: int):
-        self.current_scenario_idx = scenario_idx % 3
-        self.scenario = MapScenario(self.current_scenario_idx, self.W, self.H)
-        self.current_walls = [list(w) for w in self.scenario.walls]
-        self.current_pillars = [list(p) for p in self.scenario.pillars]
-        self.gate_wall_indices = list(getattr(self.scenario, "gate_wall_indices", []))
-        self._reset_gates()
-        self.walls_gpu, self.pillars_gpu, self.nodes_gpu = self.scenario.build_gpu_tensors(self.device)
-        self._rebuild_flow_field()
-        self.start_new_operation(restart_all=False)
+        with self._engine_lock:
+            self.current_scenario_idx = scenario_idx % 3
+            self.scenario = MapScenario(self.current_scenario_idx, self.W, self.H)
+            self.current_walls = [list(w) for w in self.scenario.walls]
+            self.current_pillars = [list(p) for p in self.scenario.pillars]
+            self.gate_wall_indices = list(getattr(self.scenario, "gate_wall_indices", []))
+            self._reset_gates()
+            self.walls_gpu, self.pillars_gpu, self.nodes_gpu = self.scenario.build_gpu_tensors(self.device)
+            self._rebuild_flow_field()
+            self.start_new_operation(restart_all=False)
 
     def configure(self, n_units: int = 400, n_factions: int = 4):
-        self.n_factions = max(2, min(4, int(n_factions)))
-        self.budget_per_faction = max(50, min(self.brains.SLOTS_PER_FACTION, int(n_units) // self.n_factions))
-        self.start_new_operation(restart_all=True)
+        with self._engine_lock:
+            self.n_factions = max(2, min(4, int(n_factions)))
+            self.budget_per_faction = max(50, min(self.brains.SLOTS_PER_FACTION, int(n_units) // self.n_factions))
+            self.start_new_operation(restart_all=True)
 
     def start_new_operation(self, restart_all: bool = False):
-        self.operation_time_sec = 0.0
+        with self._engine_lock:
+            self.operation_time_sec = 0.0
         self.tick_counter = 0
         self.epoch_winner = -1
         self.epoch_end_reason = ""
@@ -335,7 +341,8 @@ class RealisticBattleEngine:
         return False
 
     def finish_operation_and_evolve(self):
-        alive = self.hp > 0.0
+        with self._engine_lock:
+            alive = self.hp > 0.0
         if self.epoch_winner < 0:
             scores = []
             for f in range(self.n_factions):
@@ -481,6 +488,10 @@ class RealisticBattleEngine:
         return orders
 
     def step(self, dt: float = 0.0166):
+        with self._engine_lock:
+            self._step_internal(dt)
+
+    def _step_internal(self, dt: float = 0.0166):
         self.operation_time_sec += dt
         self.tick_counter += 1
         N = self.N
@@ -1314,7 +1325,8 @@ class RealisticBattleEngine:
             })
 
     def get_battle_state_snapshot(self) -> dict:
-        alive = self.hp > 0.0
+        with self._engine_lock:
+            alive = self.hp > 0.0
         generals_meta = []
         for f in range(self.n_factions):
             gen = self.brains.generals[f]
