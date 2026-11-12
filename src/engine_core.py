@@ -16,9 +16,11 @@ Klíčové metodické a technické vlastnosti:
 """
 
 import math
+import time
 import threading
 import numpy as np
 import torch
+from src.profiler import worker_prof
 
 from scenarios import MapScenario, compute_cpu_flow_field, SCENARIO_DOMINATION, SCENARIO_CITADEL, SCENARIO_CHASM, SCENARIO_NAMES
 from engine.staging_buffer import SimulationStagingBuffer

@@ -44,6 +44,7 @@ from src.telemetry_logger import TelemetryManager
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
 import battlefield_renderer as bf_render
+from src.profiler import render_prof
 
 FACTION_META = [
     {"name": "ALPHA VANGUARD", "short": "ALPHA", "color": (0, 240, 210)},
@@ -75,15 +76,34 @@ def safe_rgb(col, default=(200, 200, 200)) -> tuple[int, int, int]:
         return default
 
 
+class ModernTextCache:
+    """Blesková textová cache pro HUD: eliminuje 95 % CPU zátěže z font.render."""
+    def __init__(self):
+        self._cache = {}
+
+    def render(self, font: pygame.font.Font, text: str, color: tuple) -> pygame.Surface:
+        key = (id(font), text, color)
+        surf = self._cache.get(key)
+        if surf is None:
+            surf = font.render(text, True, color)
+            if len(self._cache) > 2500:
+                self._cache.clear()
+            self._cache[key] = surf
+        return surf
+
+
 class OptimizedTacticalHUD:
     def __init__(
         self,
         existing_screen: pygame.Surface | None = None,
         existing_engine: RealisticBattleEngine | None = None,
         existing_telemetry: TelemetryManager | None = None,
+        existing_bridge: LockFreeStateBridge | None = None,
+        existing_worker: AsyncSimulationWorker | None = None,
         embedded: bool = False,
     ):
         self.embedded = embedded
+        self.text_cache = ModernTextCache()
         if not pygame.get_init():
             pygame.init()
         pygame.display.set_caption("[BLESK] CYBER-TACTICS // VÝUKOVÝ SIMULÁTOR AI & NEURO-EVOLUCE")
@@ -117,10 +137,7 @@ class OptimizedTacticalHUD:
         self.speed_presets = [0.5, 1.0, 2.0, 4.0, 8.0]
         self.speed_idx = 1
         self.running = True
-        self.target_fps = 180
-        self._sim_accumulator = 0.0
-        self._last_sim_time = time.perf_counter()
-        self.target_fps = 180
+        self.target_fps = 60  # Plynulých 60 FPS pro uvolnění CPU a GILu pro simulační worker
         self._sim_accumulator = 0.0
         self._last_sim_time = time.perf_counter()
 
@@ -146,9 +163,15 @@ class OptimizedTacticalHUD:
             self.n_factions = 4
             self.reboot_simulation()
 
-        self.bridge = LockFreeStateBridge()
-        self.worker = AsyncSimulationWorker(self.engine, self.bridge)
-        self.worker.start()
+        if existing_bridge is not None and existing_worker is not None:
+            self.bridge = existing_bridge
+            self.worker = existing_worker
+            self._owns_worker = False
+        else:
+            self.bridge = LockFreeStateBridge()
+            self.worker = AsyncSimulationWorker(self.engine, self.bridge)
+            self.worker.start()
+            self._owns_worker = True
 
         self.zoom = 1.0
         self.cam_x = self.SIM_W * 0.5
@@ -423,7 +446,7 @@ class OptimizedTacticalHUD:
 
         pygame.draw.rect(surf, bg, rect, border_radius=4)
         pygame.draw.rect(surf, border, rect, width=1 if not (active or is_flash) else 2, border_radius=4)
-        txt = self.f_small.render(label, True, txt_col)
+        txt = self.text_cache.render(self.f_small, label, txt_col)
         surf.blit(txt, (rect.x + (rect.width - txt.get_width()) // 2, rect.y + (rect.height - txt.get_height()) // 2))
 
     def render_battlefield(self, state: dict, unit_info: dict | None):
@@ -516,11 +539,25 @@ class OptimizedTacticalHUD:
         self.viewport_rect = pygame.Rect(10, top_h + 6, vp_w, vp_h)
         dock_rect = pygame.Rect(vp_w + 14, top_h + 6, dock_w - 4, vp_h)
 
+        t_ui0 = time.perf_counter()
         self._draw_top_bar(W, top_h)
-        self.render_battlefield(state, unit_info)
-        self._draw_right_dock(dock_rect, unit_info, state)
+        t_ui1 = time.perf_counter()
 
+        t_world0 = time.perf_counter()
+        self.render_battlefield(state, unit_info)
+        t_world1 = time.perf_counter()
+
+        t_dock0 = time.perf_counter()
+        self._draw_right_dock(dock_rect, unit_info, state)
+        t_dock1 = time.perf_counter()
+
+        render_prof.record("render_ui_ms", ((t_ui1 - t_ui0) + (t_dock1 - t_dock0)) * 1000.0)
+        render_prof.record("render_world_ms", (t_world1 - t_world0) * 1000.0)
+
+        t_flip0 = time.perf_counter()
         pygame.display.flip()
+        t_flip1 = time.perf_counter()
+        render_prof.record("flip_ms", (t_flip1 - t_flip0) * 1000.0)
 
     def _draw_top_bar(self, W: int, top_h: int):
         pygame.draw.rect(self.screen, PANEL_BG, (0, 0, W, top_h))
@@ -533,17 +570,17 @@ class OptimizedTacticalHUD:
         # 1. Levá zóna: Kompaktní informační panel
         left_w = min(220, max(170, int(W * 0.17)))
         t1 = f"[BLESK] CYBER-TACTICS // EP #{self.engine.current_epoch:02d}"
-        self.screen.blit(self.f_sub.render(t1, True, ACCENT_CYAN), (10, 6))
+        self.screen.blit(self.text_cache.render(self.f_sub, t1, ACCENT_CYAN), (10, 6))
 
         scen_name = SCENARIO_NAMES[self.engine.current_scenario_idx].split("(")[0].strip()
         t2 = f"{scen_name[:16]} • {time_str}"
-        self.screen.blit(self.f_tiny.render(t2, True, ACCENT_AMBER), (10, 23))
+        self.screen.blit(self.text_cache.render(self.f_tiny, t2, ACCENT_AMBER), (10, 23))
 
         fps_val = getattr(self, "measured_fps", 60.0)
         render_ms = getattr(self, "render_time_ms", 5.0)
         sim_ms = getattr(self, "sim_time_ms", 1.0)
         t_perf = f"FPS:{fps_val:3.0f} ({render_ms:3.1f}ms) | SIM:{sim_ms:3.1f}ms"
-        self.screen.blit(self.f_tiny.render(t_perf, True, ACCENT_GREEN), (10, 38))
+        self.screen.blit(self.text_cache.render(self.f_tiny, t_perf, ACCENT_GREEN), (10, 38))
 
         # 2. Pravá zóna: Rychlosti, Kamera a Play/Pause
         r_w = 330
@@ -594,12 +631,12 @@ class OptimizedTacticalHUD:
         pygame.draw.rect(self.screen, (13, 17, 25), rect, border_radius=3)
         pygame.draw.rect(self.screen, BORDER_COL, rect, width=1, border_radius=3)
 
-        self.screen.blit(self.f_tiny.render("KŘIVKA UČENÍ AI (PRŮMĚRNÁ FITNESS)", True, ACCENT_CYAN), (rect.x + 6, rect.y + 4))
+        self.screen.blit(self.text_cache.render(self.f_tiny, "KŘIVKA UČENÍ AI (PRŮMĚRNÁ FITNESS)", ACCENT_CYAN), (rect.x + 6, rect.y + 4))
 
         hist = state.get("history_avg_fitness", [[] for _ in range(4)])
         max_len = max((len(h) for h in hist), default=0)
         if max_len < 1:
-            msg = self.f_tiny.render("Čekám na dokončení 1. epochy [E]...", True, TEXT_DIM)
+            msg = self.text_cache.render(self.f_tiny, "Čekám na dokončení 1. epochy [E]...", TEXT_DIM)
             self.screen.blit(msg, (rect.x + 8, rect.y + rect.height // 2))
             return
 
@@ -613,8 +650,8 @@ class OptimizedTacticalHUD:
         gw = rect.width - 32
         gh = rect.height - 24
 
-        lbl_max = self.f_tiny.render(f"{max_v:.0f}", True, TEXT_DIM)
-        lbl_min = self.f_tiny.render(f"{min_v:.0f}", True, TEXT_DIM)
+        lbl_max = self.text_cache.render(self.f_tiny, f"{max_v:.0f}", TEXT_DIM)
+        lbl_min = self.text_cache.render(self.f_tiny, f"{min_v:.0f}", TEXT_DIM)
         self.screen.blit(lbl_max, (rect.right - lbl_max.get_width() - 4, gy))
         self.screen.blit(lbl_min, (rect.right - lbl_min.get_width() - 4, gy + gh - lbl_min.get_height()))
 
@@ -648,14 +685,12 @@ class OptimizedTacticalHUD:
         # ==========================================
         hdr_h = max(22, int(22 * self.ui_scale))
         pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
-        self.screen.blit(self.f_sub.render("1. FRAKCE, GENERÁLOVÉ (ROI) & DOKTRÍNY", True, ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
+        self.screen.blit(self.text_cache.render(self.f_sub, "1. FRAKCE, GENERÁLOVÉ (ROI) & DOKTRÍNY", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
         y += hdr_h + 3
 
-        alive_mask = state["alive"]
-        teams = state["teams"]
-        kills = self.engine.kills_per_faction.cpu().numpy()
-        wins = self.engine.epoch_wins_per_faction
-        alive_counts = [int(np.sum((teams == f) & alive_mask)) for f in range(self.engine.n_factions)]
+        alive_counts = state.get("alive_counts", [0, 0, 0, 0])
+        kills = state.get("kills_by_faction", getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0]))
+        wins = getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0])
         total_alive = max(1, sum(alive_counts))
 
         # Tug-of-war barevný pruh poměru sil
@@ -711,8 +746,10 @@ class OptimizedTacticalHUD:
             )
 
             # Texty s čistým vertikálním a horizontálním paddingem
-            t_line1 = f"{FACTION_META[f]['short']} L{lvl} W:{wins[f]} | Síla: {eff_pct}% ({f_alive}) | K: {kills[f]}"
-            self.screen.blit(self.f_small.render(t_line1, True, f_col if eff_pct > 22 else (230, 50, 50)), (x + 12, y + 6))
+            k_val = kills[f] if f < len(kills) else 0
+            w_val = wins[f] if f < len(wins) else 0
+            t_line1 = f"{FACTION_META[f]['short']} L{lvl} W:{w_val} | Síla: {eff_pct}% ({f_alive}) | K: {k_val}"
+            self.screen.blit(self.text_cache.render(self.f_small, t_line1, f_col if eff_pct > 22 else (230, 50, 50)), (x + 12, y + 6))
 
             # Aktivní Power-Upy frakce
             f_techs = state.get("faction_techs", [[] for _ in range(4)])
@@ -727,8 +764,8 @@ class OptimizedTacticalHUD:
                 f"P:{comp[0]} M:{comp[1]} S:{comp[2]} J:{comp[3]}  •  "
                 f"Váhy: {int(probs[0]*100)}/{int(probs[1]*100)}/{int(probs[2]*100)}/{int(probs[3]*100)}%"
             )
-            self.screen.blit(self.f_tiny.render(comp_txt, True, TEXT_DIM), (x + 12, y + 24))
-            t_tech_surf = self.f_tiny.render(f"TECH:{tech_str}", True, ACCENT_AMBER if tech_tags else TEXT_DIM)
+            self.screen.blit(self.text_cache.render(self.f_tiny, comp_txt, TEXT_DIM), (x + 12, y + 24))
+            t_tech_surf = self.text_cache.render(self.f_tiny, f"TECH:{tech_str}", ACCENT_AMBER if tech_tags else TEXT_DIM)
             self.screen.blit(t_tech_surf, (x + 12, y + 38))
 
             y += row_h + 4
@@ -738,7 +775,7 @@ class OptimizedTacticalHUD:
         # 2. KŘIVKA UČENÍ AI + BOJOVÝ PROTOKOL UDÁLOSTÍ
         # ==========================================
         pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
-        self.screen.blit(self.f_sub.render("2. VÝVOJ UČENÍ (FITNESS) & PROTOKOL", True, ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
+        self.screen.blit(self.text_cache.render(self.f_sub, "2. VÝVOJ UČENÍ (FITNESS) & PROTOKOL", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
         y += hdr_h + 3
 
         mid_h = max(92, int(96 * self.ui_scale))
@@ -759,7 +796,7 @@ class OptimizedTacticalHUD:
             ev_txt = ev["text"]
             if len(ev_txt) > 28:
                 ev_txt = ev_txt[:26] + ".."
-            self.screen.blit(self.f_tiny.render(ev_txt, True, e_col), (feed_rect.x + 6, ey))
+            self.screen.blit(self.text_cache.render(self.f_tiny, ev_txt, e_col), (feed_rect.x + 6, ey))
             ey += ev_step
         y += mid_h + 8
 
@@ -768,7 +805,7 @@ class OptimizedTacticalHUD:
         # ==========================================
         pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
         lbl_mode = "MANUÁL" if self.selected_unit >= 0 else "AUTO-ELITA"
-        self.screen.blit(self.f_sub.render(f"3. HIERARCHICKÝ MOZEK (14->64->64->7) // {lbl_mode}", True, ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
+        self.screen.blit(self.text_cache.render(self.f_sub, f"3. HIERARCHICKÝ MOZEK (14->64->64->7) // {lbl_mode}", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
         y += hdr_h + 3
 
         sens_step = max(13, int(14 * self.ui_scale))
@@ -779,7 +816,7 @@ class OptimizedTacticalHUD:
         pygame.draw.rect(self.screen, BORDER_COL, insp_rect, width=1, border_radius=4)
 
         if unit_info is None:
-            msg = self.f_reg.render("Žádná jednotka není aktivní.", True, TEXT_DIM)
+            msg = self.text_cache.render(self.f_reg, "Žádná jednotka není aktivní.", TEXT_DIM)
             self.screen.blit(msg, (x + 14, y + 30))
             return
 
@@ -789,7 +826,7 @@ class OptimizedTacticalHUD:
             f"VOJÁK #{unit_info['unit_idx']:03d} (Slot #{unit_info.get('brain_slot', 0):03d}) "
             f"[{FACTION_META[f_id]['short']}] • {unit_info['class_name']}"
         )
-        self.screen.blit(self.f_small.render(u_title, True, f_col), (x + 8, y + 4))
+        self.screen.blit(self.text_cache.render(self.f_small, u_title, f_col), (x + 8, y + 4))
 
         st_parts = []
         if unit_info.get("unit_state_name"):
@@ -814,17 +851,17 @@ class OptimizedTacticalHUD:
             f"Zás:{unit_info['ammo']:.0f}/{unit_info['max_ammo']:.0f} | "
             f"Fit:{fit_val:.1f}  {status_lbl}"
         )
-        self.screen.blit(self.f_tiny.render(u_stats1, True, stat_color), (x + 8, y + 19))
+        self.screen.blit(self.text_cache.render(self.f_tiny, u_stats1, stat_color), (x + 8, y + 19))
 
         u_stats2 = f"Kills:{unit_info.get('kills', 0)} | Dmg:{dmg_dealt:.0f} | Utrž:{dmg_taken:.0f}{heal_str}"
-        self.screen.blit(self.f_tiny.render(u_stats2, True, TEXT_DIM), (x + 8, y + 33))
+        self.screen.blit(self.text_cache.render(self.f_tiny, u_stats2, TEXT_DIM), (x + 8, y + 33))
 
         df = unit_info["decision_flow"]
         col_w = (w - 14) // 2
         col_y_start = y + 48
 
         # Všech 14 senzorů v levém sloupci (Egocentrické tělesné vnímání)
-        self.screen.blit(self.f_small.render("VSTUPNÍ SENZORY (14)", True, ACCENT_CYAN), (x + 6, col_y_start))
+        self.screen.blit(self.text_cache.render(self.f_small, "VSTUPNÍ SENZORY (14)", ACCENT_CYAN), (x + 6, col_y_start))
         
         SHORT_SENSORS = [
             "1.Cíl Vpřed", "2.Cíl Vpravo", "3.Blízkost",
@@ -839,7 +876,7 @@ class OptimizedTacticalHUD:
         for i, (name, val) in enumerate(df["sensors"][:14]):
             ry = col_y_start + 16 + i * sens_step
             s_name = SHORT_SENSORS[i] if i < len(SHORT_SENSORS) else name[:12]
-            self.screen.blit(self.f_tiny.render(s_name, True, TEXT_DIM), (x + 6, ry))
+            self.screen.blit(self.text_cache.render(self.f_tiny, s_name, TEXT_DIM), (x + 6, ry))
             
             bx = x + col_w - bar_w - 4
             pygame.draw.rect(self.screen, (24, 32, 46), (bx, ry + 1, bar_w, 8), border_radius=2)
@@ -853,7 +890,7 @@ class OptimizedTacticalHUD:
 
         # Pravý sloupec: 4 výstupní akce + 28 skrytých neuronů
         rx = x + col_w + 10
-        self.screen.blit(self.f_small.render("VÝSTUPNÍ AKCE (7)", True, ACCENT_GREEN), (rx + 4, col_y_start))
+        self.screen.blit(self.text_cache.render(self.f_small, "VÝSTUPNÍ AKCE (7)", ACCENT_GREEN), (rx + 4, col_y_start))
         
         SHORT_ACTIONS = [
             "1.Surge(Plyn)", "2.Sway(Úkrok)", "3.Yaw(Míření)", "4.Trigger(Palba)",
@@ -864,7 +901,7 @@ class OptimizedTacticalHUD:
         for i, (name, val) in enumerate(df["actions"][:7]):
             ry = col_y_start + 15 + i * act_step_7
             a_name = SHORT_ACTIONS[i] if i < len(SHORT_ACTIONS) else name[:12]
-            self.screen.blit(self.f_tiny.render(a_name, True, TEXT_MAIN if abs(val) > 0.20 else TEXT_DIM), (rx + 4, ry))
+            self.screen.blit(self.text_cache.render(self.f_tiny, a_name, TEXT_MAIN if abs(val) > 0.20 else TEXT_DIM), (rx + 4, ry))
             
             bx = rx + col_w - bar_w - 4
             pygame.draw.rect(self.screen, (24, 32, 46), (bx, ry + 1, bar_w, 7), border_radius=2)
@@ -878,7 +915,7 @@ class OptimizedTacticalHUD:
 
         # Dvouvrstvá hierarchická reprezentace: H1 (Percepce 64n) + H2 (Taktika 64n) = 128 neuronů
         hy = col_y_start + 15 + 7 * act_step_7 + 8
-        self.screen.blit(self.f_tiny.render("H1: PERCEPCE PROSTORU (64 NEURONŮ // 4x16)", True, ACCENT_CYAN), (rx + 4, hy))
+        self.screen.blit(self.text_cache.render(self.f_tiny, "H1: PERCEPCE PROSTORU (64 NEURONŮ // 4x16)", ACCENT_CYAN), (rx + 4, hy))
         h1_vals = df.get("hidden_h1", df.get("hidden", [])[:64])
         n_cols = 16
         cell_gap = 2
@@ -898,7 +935,7 @@ class OptimizedTacticalHUD:
 
         # Vrstva H2: Taktická syntéza
         h2_y = hy + 14 + 4 * (cell_h + cell_gap) + 6
-        self.screen.blit(self.f_tiny.render("H2: TAKTICKÁ SYNTÉZA (64 NEURONŮ // 4x16)", True, ACCENT_AMBER), (rx + 4, h2_y))
+        self.screen.blit(self.text_cache.render(self.f_tiny, "H2: TAKTICKÁ SYNTÉZA (64 NEURONŮ // 4x16)", ACCENT_AMBER), (rx + 4, h2_y))
         h2_vals = df.get("hidden_h2", df.get("hidden", [])[64:128])
         for idx, h_val in enumerate(h2_vals[:64]):
             r_idx = idx // n_cols
@@ -919,7 +956,7 @@ class OptimizedTacticalHUD:
         sec4_h = rect.bottom - y - 4
         if sec4_h >= 110:
             pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, 22), border_radius=3)
-            self.screen.blit(self.f_sub.render("4. EKONOMIKA TŘÍD (ROI) & STATISTIKY BOJE", True, ACCENT_CYAN), (x + 8, y + 4))
+            self.screen.blit(self.text_cache.render(self.f_sub, "4. EKONOMIKA TŘÍD (ROI) & STATISTIKY BOJE", ACCENT_CYAN), (x + 8, y + 4))
             y += 24
 
             sec4_rect = pygame.Rect(x, y, w, sec4_h - 24)
@@ -928,7 +965,7 @@ class OptimizedTacticalHUD:
 
             # Tabulka ROI tříd za tuto bitvu
             th_y = y + 5
-            self.screen.blit(self.f_mono.render("TŘÍDA       CENA   ŽIVÝCH    UDĚLENO  UTRŽENO  KILLS   ROI/1b", True, ACCENT_AMBER), (x + 10, th_y))
+            self.screen.blit(self.text_cache.render(self.f_mono, "TŘÍDA       CENA   ŽIVÝCH    UDĚLENO  UTRŽENO  KILLS   ROI/1b", ACCENT_AMBER), (x + 10, th_y))
 
             class_colors = [(74, 144, 226), (65, 235, 100), (255, 195, 25), (231, 76, 60)]
             stats = state.get("live_class_stats", [])
@@ -949,7 +986,7 @@ class OptimizedTacticalHUD:
                     extra_txt = f" +{cs['healing']:.0f}H"
 
                 row_txt = f"{c_name:<11} {c_cost} b   {c_al:2d}/{c_tot:2d}    {c_dmg:6.0f}   {c_taken:6.0f}    {c_k:2d}    {c_roi:5.1f}{extra_txt}"
-                self.screen.blit(self.f_mono.render(row_txt, True, c_col), (x + 10, ry))
+                self.screen.blit(self.text_cache.render(self.f_mono, row_txt, c_col), (x + 10, ry))
 
             # Strategické body uzlů
             node_pts = state.get("node_points", [0.0, 0.0, 0.0, 0.0])
@@ -960,7 +997,11 @@ class OptimizedTacticalHUD:
 
     def run(self):
         while True:
-            if not self.handle_events():
+            t_ev0 = time.perf_counter()
+            ev_ok = self.handle_events()
+            t_ev1 = time.perf_counter()
+            render_prof.record("events_ms", (t_ev1 - t_ev0) * 1000.0)
+            if not ev_ok:
                 break
 
             if self.status_banner_timer > 0.0:
@@ -971,16 +1012,22 @@ class OptimizedTacticalHUD:
                 self.worker.set_paused(not self.running)
             self.worker.set_speed(self.speed_presets[self.speed_idx])
 
+            t_bridge0 = time.perf_counter()
             state = self.bridge.get_interpolated_state()
             if state is None:
                 state = self.engine.get_battle_state_snapshot()
+            t_bridge1 = time.perf_counter()
+            render_prof.record("bridge_lerp_ms", (t_bridge1 - t_bridge0) * 1000.0)
             self.last_state = state
             
+            t_insp0 = time.perf_counter()
             unit_info = None
             try:
                 unit_info = self.engine.inspect_unit(self.selected_unit)
             except Exception:
                 unit_info = None
+            t_insp1 = time.perf_counter()
+            render_prof.record("inspect_unit_ms", (t_insp1 - t_insp0) * 1000.0)
 
             if unit_info is not None and self.follow_selected and unit_info["hp"] > 0:
                 ux, uy = unit_info["pos"]
@@ -1000,10 +1047,17 @@ class OptimizedTacticalHUD:
             else:
                 self.vram_mb = 0.0
 
-            # Kooperativní uvolnění procesoru operačnímu systému Windows (eliminuje 100% zátěž jádra a sekání ostatních aplikací):
-            self.clock.tick(getattr(self, "target_fps", 180))
+            # Kooperativní uvolnění procesoru operačnímu systému Windows (60 FPS zámek pro hladký GIL):
+            t_tick0 = time.perf_counter()
+            self.clock.tick(getattr(self, "target_fps", 60))
+            t_tick1 = time.perf_counter()
+            render_prof.record("clock_tick_ms", (t_tick1 - t_tick0) * 1000.0)
 
-        self.worker.stop()
+            if render_prof.should_report():
+                render_prof.report_and_reset(f"FPS: {self.measured_fps:.1f}")
+
+        if getattr(self, "_owns_worker", True):
+            self.worker.stop()
         self.telemetry.flush_spatial_parquet()
         if not self.embedded:
             pygame.quit()

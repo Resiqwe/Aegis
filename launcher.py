@@ -60,6 +60,8 @@ import battlefield_renderer as bf_render
 import analyze_telemetry
 import telemetry_lab
 import hardware_telemetry
+from src.engine.state_bridge import LockFreeStateBridge
+from src.engine.async_runner import AsyncSimulationWorker
 
 # Barevná paleta - Sleek Modern Dark
 BG_VOID = (9, 11, 16)
@@ -166,11 +168,15 @@ class CyberTacticsLauncher:
         self.total_spatial_events = 0
         self.last_refresh_time = 0.0
 
-        # Sdílený výpočetní engine
+        # Sdílený výpočetní engine, Lock-Free Bridge a Asynchronní Worker
         self.engine = engine_core.RealisticBattleEngine(1600, 1000, self.device)
         self.telemetry = telemetry_logger.TelemetryManager(self.telemetry_dir)
         self.engine.telemetry_mgr = self.telemetry
         self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
+
+        self.bridge = LockFreeStateBridge()
+        self.worker = AsyncSimulationWorker(self.engine, self.bridge)
+        self.last_known_state = None
 
         # Stav simulace
         self.sim_active = False
@@ -321,11 +327,20 @@ class CyberTacticsLauncher:
             self.sim_last_epoch = self.engine.current_epoch
             self.sim_start_time = time.perf_counter()
             self.sim_status_line = "Běží kontinuální simulace kampaně..."
+
+            mult = self.speed_mults[self.sim_speed_idx]
+            self.worker.set_speed(mult)
+            self.worker.set_paused(False)
+            if not self.worker.is_alive():
+                self.worker.start()
+
             self.set_status("Simulace spuštěna! Mezerník otevírá živý pohled bojiště.", ACCENT_GREEN)
 
     def toggle_sim_pause(self):
         if self.sim_active:
             self.sim_paused = not self.sim_paused
+            if self.worker.is_alive():
+                self.worker.set_paused(self.sim_paused)
             self.set_status("Simulace pozastavena." if self.sim_paused else "Simulace pokračuje.", ACCENT_AMBER if self.sim_paused else ACCENT_GREEN)
 
     def stop_simulation(self, save: bool = True):
@@ -333,6 +348,8 @@ class CyberTacticsLauncher:
             return
         self.sim_active = False
         self.sim_paused = False
+        if self.worker.is_alive():
+            self.worker.stop()
         if save:
             snap_path = self.telemetry.save_snapshot(self.engine, custom_tag="user_stop")
             self.refresh_telemetry_data()
@@ -340,50 +357,28 @@ class CyberTacticsLauncher:
 
     def step_simulation_background(self):
         if not self.sim_active or self.sim_paused or getattr(self, "_preview_open", False):
-            self._last_bg_time = time.perf_counter()
             return
 
-        now = time.perf_counter()
-        if not hasattr(self, "_last_bg_time"):
-            self._last_bg_time = now
-            self._bg_acc = 0.0
-
-        dt_frame = min(0.08, now - self._last_bg_time)
-        self._last_bg_time = now
-
+        # Řízení rychlosti workeru podle nastavení launcheru
         mult = self.speed_mults[self.sim_speed_idx]
-        self._bg_acc += dt_frame * mult
+        self.worker.set_speed(mult)
+        self.worker.set_paused(self.sim_paused)
 
-        sim_dt = 1.0 / 60.0
-        # Přísný frame budget 6 ms: GUI má prioritu pro 180Hz plynulost
-        budget_sec = 0.006 if mult <= 2.0 else 0.012
-        t0 = time.perf_counter()
-        steps = 0
+        # Načteme interpolovaný stav z lock-free mostu (bez zátěže GPU a bez volání engine.step!)
+        st = self.bridge.get_interpolated_state()
+        if st is not None:
+            self.last_known_state = st
 
-        while self._bg_acc >= sim_dt and (time.perf_counter() - t0) < budget_sec:
-            self.engine.step(sim_dt)
-            self._bg_acc -= sim_dt
-            steps += 1
+        # Sledování epoch a TPS z běžícího workeru
+        self.sim_tps = self.worker.current_tps
+        if self.engine.current_epoch > self.sim_last_epoch:
+            self.sim_done_epochs += 1
+            self.sim_last_epoch = self.engine.current_epoch
+            self.telemetry.flush_spatial_parquet()
+            self.refresh_telemetry_live()
 
-            if self.engine.current_epoch > self.sim_last_epoch:
-                self.sim_done_epochs += 1
-                self.sim_last_epoch = self.engine.current_epoch
-                self.telemetry.flush_spatial_parquet()
-                self.refresh_telemetry_live()
-
-                if self.sim_target_epochs > 0 and self.sim_done_epochs >= self.sim_target_epochs:
-                    self.stop_simulation(save=True)
-                    break
-
-        if self._bg_acc > 0.2:
-            self._bg_acc = 0.0
-
-        self.sim_step_counter += steps
-        if now - self.sim_tps_timer >= 0.5:
-            d_time = max(0.001, now - self.sim_tps_timer)
-            self.sim_tps = self.sim_step_counter / d_time
-            self.sim_step_counter = 0
-            self.sim_tps_timer = now
+            if self.sim_target_epochs > 0 and self.sim_done_epochs >= self.sim_target_epochs:
+                self.stop_simulation(save=True)
 
     def open_live_preview(self):
         if getattr(self, "_preview_open", False):
@@ -398,11 +393,15 @@ class CyberTacticsLauncher:
                 existing_screen=self.screen,
                 existing_engine=self.engine,
                 existing_telemetry=self.telemetry,
+                existing_bridge=self.bridge,
+                existing_worker=self.worker,
                 embedded=True,
             )
             hud_app.running = not self.sim_paused
             hud_app.run()
             self.sim_paused = not hud_app.running
+            if self.worker.is_alive():
+                self.worker.set_paused(self.sim_paused)
             pygame.display.set_caption("CYBER-TACTICS // VELITELSKÝ DOK & AI SIMULÁTOR")
             self.W, self.H = self.screen.get_size()
             self._rebuild_fonts()
@@ -485,7 +484,10 @@ class CyberTacticsLauncher:
         # =====================================================================
         # 2. FRAKČNÍ HERO KARTY (TOP KPI STRIP)
         # =====================================================================
-        state = self.engine.get_battle_state_snapshot()
+        state = self.last_known_state
+        if state is None:
+            state = self.engine.get_battle_state_snapshot()
+            self.last_known_state = state
         strip_y = top_h + 10
         card_h = max(90, int(100 * self.scale))
         card_gap = 12

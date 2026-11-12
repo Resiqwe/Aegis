@@ -10,6 +10,7 @@ import threading
 import queue
 from typing import Callable, Any
 from engine.state_bridge import LockFreeStateBridge
+from src.profiler import worker_prof
 
 
 class AsyncSimulationWorker:
@@ -99,6 +100,8 @@ class AsyncSimulationWorker:
         last_time = time.perf_counter()
         accumulator = 0.0
         sim_dt = self.fixed_dt
+        last_snap_time = 0.0
+        snap_interval = 1.0 / 30.0  # Maximálně 30 snapshotů za sekundu (odlehčení PCIe a GILu)
 
         # Počáteční publikace stavu
         initial_state = self.engine.get_battle_state_snapshot()
@@ -125,19 +128,32 @@ class AsyncSimulationWorker:
                     self.engine.step(sim_dt)
                     
                     t_step1 = time.perf_counter()
-                    self.step_time_ms = 0.85 * self.step_time_ms + 0.15 * ((t_step1 - t_step0) * 1000.0)
-
-                    # 2. Publikace do Lock-free mostu
-                    raw_snapshot = self.engine.get_battle_state_snapshot()
-                    self.bridge.publish_simulation_state(raw_snapshot, sim_dt)
+                    step_dur = (t_step1 - t_step0) * 1000.0
+                    worker_prof.record("sim_step_ms", step_dur)
+                    self.step_time_ms = 0.85 * self.step_time_ms + 0.15 * step_dur
 
                     accumulator -= sim_dt
                     steps_done += 1
                     self._step_counter += 1
 
+                # 2. Publikace do Lock-free mostu (omezeno na 30 Hz pro plynulost plátna a nulový GIL stall)
+                now_curr = time.perf_counter()
+                if (now_curr - last_snap_time) >= snap_interval and steps_done > 0:
+                    t_snap0 = time.perf_counter()
+                    raw_snapshot = self.engine.get_battle_state_snapshot()
+                    t_snap1 = time.perf_counter()
+                    snap_dur = (t_snap1 - t_snap0) * 1000.0
+                    worker_prof.record("snapshot_ms", snap_dur)
+
+                    self.bridge.publish_simulation_state(raw_snapshot, sim_dt)
+                    last_snap_time = now_curr
+
                 # Ochrana proti zpoždění při minimalizaci okna / alt-tabu
                 if accumulator > 0.20:
                     accumulator = 0.0
+
+            if worker_prof.should_report():
+                worker_prof.report_and_reset(f"TPS: {self.current_tps:.1f}")
 
             # Měření aktuální frekvence TPS (ticks per second)
             now_tps = time.perf_counter()
@@ -147,5 +163,5 @@ class AsyncSimulationWorker:
                 self._step_counter = 0
                 self._tps_timer = now_tps
 
-            # Krátké kooperativní uvolnění vlákna CPU (0.5 ms sleep)
-            time.sleep(0.0005)
+            # Garantované uvolnění CPU a GILu pro vykreslovací vlákno (1.0 ms sleep)
+            time.sleep(0.001)
