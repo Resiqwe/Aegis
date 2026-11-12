@@ -49,6 +49,10 @@ class AsyncSimulationWorker:
     def is_running(self) -> bool:
         return self._running and not self._paused
 
+    def is_alive(self) -> bool:
+        """Vrátí True, pokud podkladové simulační vlákno běží."""
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self):
         """Spustí simulační vlákno."""
         if self._thread is not None and self._thread.is_alive():
