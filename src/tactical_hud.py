@@ -41,6 +41,8 @@ from src.scenarios import SCENARIO_NAMES
 from src.engine_core import RealisticBattleEngine, FACTION_COLORS, DOCTRINE_LIST
 from src.ai_brains import CLASS_GRUNT, CLASS_MEDIC, CLASS_SNIPER, CLASS_JUGGERNAUT, TECH_NAMES, TECH_COSTS
 from src.telemetry_logger import TelemetryManager
+from src.engine.state_bridge import LockFreeStateBridge
+from src.engine.async_runner import AsyncSimulationWorker
 import battlefield_renderer as bf_render
 
 FACTION_META = [
@@ -144,6 +146,10 @@ class OptimizedTacticalHUD:
             self.n_factions = 4
             self.reboot_simulation()
 
+        self.bridge = LockFreeStateBridge()
+        self.worker = AsyncSimulationWorker(self.engine, self.bridge)
+        self.worker.start()
+
         self.zoom = 1.0
         self.cam_x = self.SIM_W * 0.5
         self.cam_y = self.SIM_H * 0.5
@@ -177,7 +183,10 @@ class OptimizedTacticalHUD:
 
     def reboot_simulation(self):
         b_pts = self.unit_presets[self.unit_preset_idx]
-        self.engine.configure(b_pts * self.n_factions, self.n_factions)
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("configure", b_pts * self.n_factions, self.n_factions)
+        else:
+            self.engine.configure(b_pts * self.n_factions, self.n_factions)
         self.selected_unit = -1
 
     def reset_camera(self):
@@ -234,8 +243,11 @@ class OptimizedTacticalHUD:
                     )
                     self._rebuild_fonts()
                 elif ev.key == pygame.K_e:
-                    self.engine.finish_operation_and_evolve()
-                    self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Proběhlo křížení mozků a ROI učení generálů")
+                    if hasattr(self, "worker") and self.worker is not None:
+                        self.worker.post_command("force_evolve")
+                    else:
+                        self.engine.finish_operation_and_evolve()
+                    self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na evoluci zařazen")
                 elif ev.key == pygame.K_t:
                     self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
                     self.show_banner(f"Rychlost tréninku: {self.speed_presets[self.speed_idx]:g}x")
@@ -251,7 +263,11 @@ class OptimizedTacticalHUD:
                 elif ev.key in (pygame.K_HOME, pygame.K_c):
                     self.reset_camera()
                 elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
-                    self.engine.switch_scenario(ev.key - pygame.K_1)
+                    scen_target = ev.key - pygame.K_1
+                    if hasattr(self, "worker") and self.worker is not None:
+                        self.worker.post_command("switch_scenario", scen_target)
+                    else:
+                        self.engine.switch_scenario(scen_target)
 
             elif ev.type == pygame.MOUSEWHEEL:
                 mx, my = pygame.mouse.get_pos()
@@ -266,7 +282,10 @@ class OptimizedTacticalHUD:
                 if ev.button == 1:
                     if not self._check_ui_click(mx, my) and self.viewport_rect.collidepoint(mx, my):
                         wx, wy = self.screen_to_world(mx, my)
-                        pos_np = self.engine.pos.cpu().numpy()
+                        if hasattr(self, "last_state") and self.last_state and "pos" in self.last_state:
+                            pos_np = self.last_state["pos"]
+                        else:
+                            pos_np = self.engine.pos.cpu().numpy()
                         dists = np.hypot(pos_np[:, 0] - wx, pos_np[:, 1] - wy)
                         min_d = np.min(dists)
                         if min_d <= 40.0:
@@ -324,8 +343,11 @@ class OptimizedTacticalHUD:
             self.running = not self.running
             self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0)
         elif key == "next_epoch":
-            self.engine.finish_operation_and_evolve()
-            self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Křížení mozků & ROI aktualizace", 3.0)
+            if hasattr(self, "worker") and self.worker is not None:
+                self.worker.post_command("force_evolve")
+            else:
+                self.engine.finish_operation_and_evolve()
+            self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
         elif key.startswith("speed_"):
             self.speed_idx = int(key.split("_")[1])
             self.show_banner(f"[BLESK] Rychlost simulace nastavena: {self.speed_presets[self.speed_idx]:g}x", 2.0)
@@ -337,7 +359,10 @@ class OptimizedTacticalHUD:
             self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0)
         elif key == "cycle_scenario":
             next_scen = (self.engine.current_scenario_idx + 1) % 3
-            self.engine.switch_scenario(next_scen)
+            if hasattr(self, "worker") and self.worker is not None:
+                self.worker.post_command("switch_scenario", next_scen)
+            else:
+                self.engine.switch_scenario(next_scen)
             scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
             self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
         elif key == "cycle_units":
@@ -356,7 +381,10 @@ class OptimizedTacticalHUD:
         elif key.startswith("doc_"):
             f_id = int(key.split("_")[1])
             new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
-            self.engine.set_faction_doctrine(f_id, new_doc)
+            if hasattr(self, "worker") and self.worker is not None:
+                self.worker.post_command("set_doctrine", f_id, new_doc)
+            else:
+                self.engine.set_faction_doctrine(f_id, new_doc)
             doc_name = DOCTRINE_LIST[new_doc]
             doc_desc = {
                 "BALANCED": "Vyvážený taktický postup a obsazování",
@@ -937,22 +965,21 @@ class OptimizedTacticalHUD:
             if self.status_banner_timer > 0.0:
                 self.status_banner_timer = max(0.0, self.status_banner_timer - (1.0 / 60.0))
 
-            t_sim_start = time.perf_counter()
-            now_hud = time.perf_counter()
-            if not hasattr(self, "_last_sim_time"):
-                self._last_sim_time = now_hud
-                self._sim_accumulator = 0.0
-            dt_hud = min(0.04, now_hud - self._last_sim_time)
-            self._last_sim_time = now_hud
-            if self.running:
-                spd = self.speed_presets[self.speed_idx]
-                # Zaručuje přesné zrychlení i při nižším FPS bez ořezání:
-                step_dt = dt_hud * spd
-                self.engine.step(step_dt)
-            t_sim = time.perf_counter() - t_sim_start
+            # 180 FPS Lock-Free State Bridge & Async Simulation Worker
+            if self.worker.is_running() != self.running:
+                self.worker.set_paused(not self.running)
+            self.worker.set_speed(self.speed_presets[self.speed_idx])
 
-            state = self.engine.get_battle_state_snapshot()
-            unit_info = self.engine.inspect_unit(self.selected_unit)
+            state = self.bridge.get_interpolated_state()
+            if state is None:
+                state = self.engine.get_battle_state_snapshot()
+            self.last_state = state
+            
+            unit_info = None
+            try:
+                unit_info = self.engine.inspect_unit(self.selected_unit)
+            except Exception:
+                unit_info = None
 
             if unit_info is not None and self.follow_selected and unit_info["hp"] > 0:
                 ux, uy = unit_info["pos"]
@@ -964,7 +991,7 @@ class OptimizedTacticalHUD:
             t_rend = time.perf_counter() - t_rend_start
 
             # Aktualizace systémové telemetrie výkonu
-            self.sim_time_ms = 0.85 * getattr(self, "sim_time_ms", 1.0) + 0.15 * (t_sim * 1000.0)
+            self.sim_time_ms = getattr(self.worker, "step_time_ms", 1.0)
             self.render_time_ms = 0.85 * getattr(self, "render_time_ms", 1.0) + 0.15 * (t_rend * 1000.0)
             self.measured_fps = self.clock.get_fps()
             if self.device.type == "cuda":
@@ -975,6 +1002,7 @@ class OptimizedTacticalHUD:
             # Kooperativní uvolnění procesoru operačnímu systému Windows (eliminuje 100% zátěž jádra a sekání ostatních aplikací):
             self.clock.tick(getattr(self, "target_fps", 180))
 
+        self.worker.stop()
         self.telemetry.flush_spatial_parquet()
         if not self.embedded:
             pygame.quit()

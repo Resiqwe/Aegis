@@ -7,6 +7,7 @@ Komunikuje s renderovacím vláknem pomocí LockFreeStateBridge bez zpomalován�
 
 import time
 import threading
+import queue
 from typing import Callable, Any
 from engine.state_bridge import LockFreeStateBridge
 
@@ -14,6 +15,7 @@ from engine.state_bridge import LockFreeStateBridge
 class AsyncSimulationWorker:
     """
     Spouští a řídí běh fyziky a AI v dedikovaném systémovém vlákně.
+    Zahrnuje thread-safe command queue pro GUI rozhraní (launcher/HUD).
     """
     def __init__(self, engine_instance: Any, bridge: LockFreeStateBridge):
         self.engine = engine_instance
@@ -23,6 +25,7 @@ class AsyncSimulationWorker:
         self._running = False
         self._paused = False
         self._stop_requested = threading.Event()
+        self.command_queue = queue.Queue()
         
         # Škálování rychlosti simulace (0.5x, 1x, 2x, 4x)
         self.speed_multiplier = 1.0
@@ -63,6 +66,32 @@ class AsyncSimulationWorker:
             self._thread.join(timeout=join_timeout)
         self._thread = None
 
+    def post_command(self, cmd_name: str, *args, **kwargs):
+        """Odešle příkaz do simulačního vlákna (bezpečné volání z libovolného vlákna)."""
+        self.command_queue.put((cmd_name, args, kwargs))
+
+    def _process_commands(self):
+        """Zpracuje všechny čekající GUI příkazy v kontextu simulačního workeru."""
+        while not self.command_queue.empty():
+            try:
+                cmd_name, args, kwargs = self.command_queue.get_nowait()
+                if callable(cmd_name):
+                    cmd_name(self.engine, *args, **kwargs)
+                elif cmd_name == "switch_scenario":
+                    self.engine.switch_scenario(*args, **kwargs)
+                elif cmd_name == "set_doctrine" or cmd_name == "set_faction_doctrine":
+                    self.engine.set_faction_doctrine(*args, **kwargs)
+                elif cmd_name == "start_new_operation":
+                    self.engine.start_new_operation(*args, **kwargs)
+                elif cmd_name == "configure":
+                    self.engine.configure(*args, **kwargs)
+                elif cmd_name in ("force_evolve", "finish_operation_and_evolve"):
+                    self.engine.finish_operation_and_evolve()
+                elif hasattr(self.engine, cmd_name):
+                    getattr(self.engine, cmd_name)(*args, **kwargs)
+            except Exception as e:
+                print(f"[AsyncSimulationWorker] Chyba při zpracování příkazu {cmd_name}: {e}")
+
     def _worker_loop(self):
         """
         Vnitřní smyčka worker vlákna s precizním time-accumulator řízením.
@@ -76,6 +105,7 @@ class AsyncSimulationWorker:
         self.bridge.publish_simulation_state(initial_state, sim_dt)
 
         while not self._stop_requested.is_set():
+            self._process_commands()
             now = time.perf_counter()
             frame_dt = min(0.10, now - last_time)
             last_time = now

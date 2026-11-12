@@ -1026,8 +1026,10 @@ class RealisticBattleEngine:
                 # Pud sebezáchovy: penalizace za poškození utržené mimo kryt
                 out_of_cover_hit = is_hit & (~self.in_cover[valid_t])
                 if out_of_cover_hit.any():
+                    pen_targets = valid_t[out_of_cover_hit]
+                    pen_dmg = (dmg * 0.22)[out_of_cover_hit]
                     self.staging_buf.out_of_cover_penalty.index_add_(
-                        0, valid_t, dmg * 0.22 * out_of_cover_hit.float()
+                        0, pen_targets, pen_dmg
                     )
 
                 # Near-miss suppression pro jednotky v okolí zásahu
@@ -1035,8 +1037,10 @@ class RealisticBattleEngine:
                     d_to_targets = torch.cdist(p_alive, self.pos[valid_t])
                     near_miss = (d_to_targets < 65.0).any(dim=1)
                     if near_miss.any():
+                        supp_targets = alive_idx[near_miss]
+                        supp_vals = torch.full((supp_targets.numel(),), 0.10, device=self.device)
                         self.staging_buf.delta_suppression.index_add_(
-                            0, alive_idx[near_miss], torch.full((near_miss.sum().item(),), 0.10, device=self.device)
+                            0, supp_targets, supp_vals
                         )
 
                 self.damage_dealt[valid_s] += dmg
@@ -1440,53 +1444,58 @@ class RealisticBattleEngine:
         return int(torch.argmax(fit_masked).item())
 
     def inspect_unit(self, unit_idx: int) -> dict | None:
-        if not (0 <= unit_idx < self.N) or self.hp[unit_idx] <= 0:
-            unit_idx = self.get_best_alive_unit()
-        b_slot = int(self.brain_slots[unit_idx].item())
-        flow = self.brains.inspect_decision_flow(b_slot, self.last_sensors[unit_idx])
-        c_id = int(self.classes[unit_idx].item())
-        t_id = int(self.teams[unit_idx].item())
+        try:
+            if not (0 <= unit_idx < self.N) or self.hp[unit_idx] <= 0:
+                unit_idx = self.get_best_alive_unit()
+            if not (0 <= unit_idx < self.N):
+                return None
+            b_slot = int(self.brain_slots[unit_idx].item())
+            flow = self.brains.inspect_decision_flow(b_slot, self.last_sensors[unit_idx])
+            c_id = int(self.classes[unit_idx].item())
+            t_id = int(self.teams[unit_idx].item())
 
-        tar_idx = int(self.last_target_enemy[unit_idx].item()) if hasattr(self, "last_target_enemy") else -1
-        has_los = bool(self.has_los_target[unit_idx].item()) if hasattr(self, "has_los_target") else False
-        
-        tar_pos = None
-        if 0 <= tar_idx < self.N and self.hp[tar_idx] > 0 and has_los:
-            p_self = self.pos[unit_idx]
-            p_tar = self.pos[tar_idx]
-            t_diff = p_tar - p_self
-            t_dist = torch.norm(t_diff).item()
-            t_ang = math.atan2(t_diff[1].item(), t_diff[0].item())
-            u_th = float(self.heading[unit_idx].item())
-            a_diff = (t_ang - u_th + math.pi) % (2.0 * math.pi) - math.pi
+            tar_idx = int(self.last_target_enemy[unit_idx].item()) if hasattr(self, "last_target_enemy") else -1
+            has_los = bool(self.has_los_target[unit_idx].item()) if hasattr(self, "has_los_target") else False
             
-            # Cíl je viditelný pouze v zorném poli (FOV kužel +-72 st) a v dosahu viditelnosti
-            if (abs(a_diff) < math.radians(72) or t_dist < 75.0) and t_dist < 700.0:
-                tar_pos = p_tar.cpu().numpy().tolist()
+            tar_pos = None
+            if 0 <= tar_idx < self.N and self.hp[tar_idx] > 0 and has_los:
+                p_self = self.pos[unit_idx]
+                p_tar = self.pos[tar_idx]
+                t_diff = p_tar - p_self
+                t_dist = torch.norm(t_diff).item()
+                t_ang = math.atan2(t_diff[1].item(), t_diff[0].item())
+                u_th = float(self.heading[unit_idx].item())
+                a_diff = (t_ang - u_th + math.pi) % (2.0 * math.pi) - math.pi
+                
+                # Cíl je viditelný pouze v zorném poli (FOV kužel +-72 st) a v dosahu viditelnosti
+                if (abs(a_diff) < math.radians(72) or t_dist < 75.0) and t_dist < 700.0:
+                    tar_pos = p_tar.cpu().numpy().tolist()
 
-        return {
-            "unit_idx": unit_idx,
-            "brain_slot": b_slot,
-            "team": t_id,
-            "class_id": c_id,
-            "class_name": CLASS_NAMES[c_id],
-            "pos": self.pos[unit_idx].cpu().numpy(),
-            "heading": float(self.heading[unit_idx].item()),
-            "fitness": float(self.fitness[unit_idx].item()),
-            "kills": int(self.unit_kills[unit_idx].item()),
-            "damage_dealt": float(self.damage_dealt[unit_idx].item()),
-            "damage_taken": float(self.damage_taken[unit_idx].item()),
-            "healing_done": float(self.healing_done[unit_idx].item()),
-            "range": float(self.class_range[unit_idx].item()),
-            "target_pos": tar_pos,
-            "hp": float(self.hp[unit_idx].item()),
-            "max_hp": float(self.class_max_hp[unit_idx].item()),
-            "ammo": float(self.ammo_in_mag[unit_idx].item()),
-            "max_ammo": float(self.class_mag_size[unit_idx].item()),
-            "reloading": bool(self.reload_timer[unit_idx] > 0.0),
-            "suppression": float(self.suppression[unit_idx].item()),
-            "in_cover": bool(self.in_cover[unit_idx].item()),
-            "unit_state": int(self.unit_state[unit_idx].item()) if hasattr(self, "unit_state") else 0,
-            "unit_state_name": STATE_NAMES[int(self.unit_state[unit_idx].item())] if hasattr(self, "unit_state") else "IDLE",
-            "decision_flow": flow,
-        }
+            return {
+                "unit_idx": unit_idx,
+                "brain_slot": b_slot,
+                "team": t_id,
+                "class_id": c_id,
+                "class_name": CLASS_NAMES[c_id],
+                "pos": self.pos[unit_idx].cpu().numpy(),
+                "heading": float(self.heading[unit_idx].item()),
+                "fitness": float(self.fitness[unit_idx].item()),
+                "kills": int(self.unit_kills[unit_idx].item()),
+                "damage_dealt": float(self.damage_dealt[unit_idx].item()),
+                "damage_taken": float(self.damage_taken[unit_idx].item()),
+                "healing_done": float(self.healing_done[unit_idx].item()),
+                "range": float(self.class_range[unit_idx].item()),
+                "target_pos": tar_pos,
+                "hp": float(self.hp[unit_idx].item()),
+                "max_hp": float(self.class_max_hp[unit_idx].item()),
+                "ammo": float(self.ammo_in_mag[unit_idx].item()),
+                "max_ammo": float(self.class_mag_size[unit_idx].item()),
+                "reloading": bool(self.reload_timer[unit_idx] > 0.0),
+                "suppression": float(self.suppression[unit_idx].item()),
+                "in_cover": bool(self.in_cover[unit_idx].item()),
+                "unit_state": int(self.unit_state[unit_idx].item()) if hasattr(self, "unit_state") else 0,
+                "unit_state_name": STATE_NAMES[int(self.unit_state[unit_idx].item())] if hasattr(self, "unit_state") else "IDLE",
+                "decision_flow": flow,
+            }
+        except Exception:
+            return None
