@@ -121,6 +121,12 @@ class RealisticBattleEngine:
         self.staging_buf = SimulationStagingBuffer(self.N, self.device)
         # Thread-safe reentrantní zámek chránící stav tenzorů před souběžným zápisem
         self._engine_lock = threading.RLock()
+        
+        # Prealokované konstantní tenzory pro eliminaci dynamické CUDA alokace v hot-path
+        self.CONST_CLASS_MAX_VIS = torch.tensor([380.0, 320.0, 680.0, 380.0], dtype=torch.float32, device=self.device)
+        self.CONST_RELOAD_TIME = torch.tensor(1.8, dtype=torch.float32, device=self.device)
+        self.CONST_CLASS_COOLDOWNS = torch.tensor([8, 9, 22, 5], dtype=torch.int32, device=self.device)
+        self.CONST_CLASS_BASE_ACC = torch.tensor([0.82, 0.80, 0.90, 0.78], dtype=torch.float32, device=self.device)
 
     def _reset_gates(self):
         gates = getattr(self.scenario, "gates", [])
@@ -555,7 +561,7 @@ class RealisticBattleEngine:
             # Reálný zrakový dosah podle specializace vojáka (Zákaz spatření cíle přes celou mapu na 2000 px)
             c_alive = self.classes[alive_idx]
             # Pěšák: 380px, Medik: 320px, Sniper: 680px, Juggernaut: 380px
-            max_vis = torch.tensor([380.0, 320.0, 680.0, 380.0], device=self.device)[c_alive.long()].unsqueeze(1)
+            max_vis = self.CONST_CLASS_MAX_VIS[c_alive.long()].unsqueeze(1)
 
             # Proximitní slyšení kroků za zády povoleno pouze na kontaktní vzdálenost do 75 px
             can_spot = (~same_team) & (dist_mat <= max_vis) & (in_fov | (dist_mat < 75.0))
@@ -910,7 +916,7 @@ class RealisticBattleEngine:
         empty_mag = self.ammo_in_mag <= 0
         tactical_cover_reload = self.in_cover & (self.ammo_in_mag < self.class_mag_size * 0.45) & (~has_combat_target)
         start_reload = alive & (empty_mag | tactical_cover_reload) & (self.reload_timer <= 0.0) & (self.ammo_in_mag < self.class_mag_size)
-        self.reload_timer = torch.where(start_reload, torch.tensor(1.8, device=self.device), self.reload_timer)
+        self.reload_timer = torch.where(start_reload, self.CONST_RELOAD_TIME, self.reload_timer)
 
         # Střelba: Výstup 3 je Trigger (Sigmoid [0, 1] > 0.58)
         self.cooldown = (self.cooldown - 1).clamp(min=0)
@@ -962,7 +968,7 @@ class RealisticBattleEngine:
             if valid_s.numel() > 0:
                 self.ammo_in_mag[valid_s] -= 1.0
                 s_classes = self.classes[valid_s].long()
-                cd_val = torch.tensor([8, 9, 22, 5], dtype=torch.int32, device=self.device)[s_classes]
+                cd_val = self.CONST_CLASS_COOLDOWNS[s_classes]
                 self.cooldown[valid_s] = cd_val
 
                 fire_vec = self.pos[valid_s] - self.pos[valid_t]
@@ -970,7 +976,7 @@ class RealisticBattleEngine:
                 self.incoming_fire_dir[valid_t] = fire_vec / fire_norm
 
                 # Přesnost podle třídy
-                base_acc = torch.tensor([0.82, 0.80, 0.90, 0.78], device=self.device)[s_classes]
+                base_acc = self.CONST_CLASS_BASE_ACC[s_classes]
                 cover_mult = torch.where(s_classes == CLASS_SNIPER, 0.60, 0.48)
                 t_doc = self.faction_doctrine_tensor[self.teams[valid_t].long()]
                 hold_bonus = torch.where(t_doc == DOCTRINE_HOLD, 0.85, 1.0)
@@ -1126,27 +1132,27 @@ class RealisticBattleEngine:
                 alive_particles.append(p)
         self.particles = alive_particles
 
-        # Obsazování uzlů (optimalizovaný dávkový krok po 6 ticích pro maximální propustnost GPU bez pipeline stallů)
+        # Obsazování uzlů (čistě tenzorově na GPU bez CPU/NumPy přenosů)
         if self.nodes_gpu.shape[0] > 0 and (self.tick_counter % 6 == 0) and alive.any():
             p_alive = self.pos[alive_idx]
             t_alive = self.teams[alive_idx].long()
-            nodes_cpu = self.nodes_gpu.cpu().numpy()
             step_scale = 6.0
-            for i in range(len(nodes_cpu)):
-                nx = float(nodes_cpu[i, 0])
-                ny = float(nodes_cpu[i, 1])
-                nr = float(nodes_cpu[i, 2])
-                n_owner = int(nodes_cpu[i, 3])
-                n_cap = float(nodes_cpu[i, 4])
+            num_nodes = self.nodes_gpu.shape[0]
+            for i in range(num_nodes):
+                nx = self.nodes_gpu[i, 0]
+                ny = self.nodes_gpu[i, 1]
+                nr = self.nodes_gpu[i, 2]
+                n_owner = int(self.nodes_gpu[i, 3].item())
+                n_cap = self.nodes_gpu[i, 4]
 
                 dists_sq = (p_alive[:, 0] - nx) ** 2 + (p_alive[:, 1] - ny) ** 2
                 in_node = dists_sq <= (nr * nr)
                 if in_node.any():
                     pres_t = t_alive[in_node]
-                    cnts = torch.bincount(pres_t, minlength=4).cpu().numpy()
-                    dom_t = int(np.argmax(cnts))
+                    cnts = torch.bincount(pres_t, minlength=4)
+                    dom_t = int(torch.argmax(cnts).item())
                     cnt_dom = cnts[dom_t]
-                    cnt_other = np.sum(cnts) - cnt_dom
+                    cnt_other = cnts.sum() - cnt_dom
 
                     if cnt_dom > cnt_other:
                         capturing_units = alive_idx[in_node & (t_alive == dom_t)]
@@ -1156,13 +1162,13 @@ class RealisticBattleEngine:
                         if n_owner == dom_t:
                             if n_cap < 1.0:
                                 self.fitness[capturing_units] += (0.45 * step_scale) * bonus_mult
-                            n_cap = min(1.0, n_cap + 0.04 * step_scale)
+                            n_cap = torch.clamp(n_cap + 0.04 * step_scale, max=1.0)
                         else:
                             self.fitness[capturing_units] += (0.65 * step_scale) * bonus_mult
-                            n_cap -= 0.05 * step_scale
+                            n_cap = n_cap - 0.05 * step_scale
                             if n_cap <= 0.0:
                                 n_owner = dom_t
-                                n_cap = 0.12
+                                n_cap = torch.tensor(0.12, device=self.device)
                                 if len(self.combat_events) > 35:
                                     self.combat_events.pop(0)
                                 meta_dom = ["ALPHA", "OMEGA", "SOLAR", "PHANTOM"][dom_t]
@@ -1173,14 +1179,13 @@ class RealisticBattleEngine:
                                     "text": f"[{sec_t:02d}s] {meta_dom} obsadil {n_label}!",
                                     "team": dom_t
                                 })
-                nodes_cpu[i, 3] = float(n_owner)
-                nodes_cpu[i, 4] = float(n_cap)
+                self.nodes_gpu[i, 3] = float(n_owner)
+                self.nodes_gpu[i, 4] = n_cap
                 if n_owner >= 0 and n_cap >= 0.7:
                     self.node_control_points[n_owner] += 0.08 * step_scale
                     f_in = in_node & (t_alive == n_owner)
                     if f_in.any():
                         self.fitness[alive_idx[f_in]] += 0.25 * step_scale
-            self.nodes_gpu.copy_(torch.from_numpy(nodes_cpu).to(self.device))
 
         self._update_gates(dt)
 
@@ -1327,11 +1332,73 @@ class RealisticBattleEngine:
     def get_battle_state_snapshot(self) -> dict:
         with self._engine_lock:
             alive = self.hp > 0.0
+            N = self.N
+
+            # ==============================================================
+            # SDRUŽENÝ BALÍK STAVU JEDNOTEK: 1 jediný PCIe transfer z GPU do CPU
+            # (Eliminuje 18 samostatných synchronizací a radikálně zrychluje FPS)
+            # ==============================================================
+            packed_gpu = torch.empty((N, 18), dtype=torch.float32, device=self.device)
+            packed_gpu[:, 0] = self.pos[:, 0]
+            packed_gpu[:, 1] = self.pos[:, 1]
+            packed_gpu[:, 2] = self.heading
+            packed_gpu[:, 3] = self.hp
+            packed_gpu[:, 4] = self.class_max_hp
+            packed_gpu[:, 5] = self.teams.float()
+            packed_gpu[:, 6] = self.classes.float()
+            packed_gpu[:, 7] = alive.float()
+            packed_gpu[:, 8] = self.suppression
+            packed_gpu[:, 9] = self.in_cover.float()
+            packed_gpu[:, 10] = self.reload_timer
+            packed_gpu[:, 11] = self.has_kinetic_shield.float() if hasattr(self, "has_kinetic_shield") else 0.0
+            packed_gpu[:, 12] = self.unit_state.float() if hasattr(self, "unit_state") else 0.0
+            packed_gpu[:, 13] = self.damage_dealt
+            packed_gpu[:, 14] = self.damage_taken
+            packed_gpu[:, 15] = self.unit_kills.float()
+            packed_gpu[:, 16] = self.fitness
+            packed_gpu[:, 17] = self.healing_done
+
+            packed_cpu = packed_gpu.cpu().numpy()
+
+            # Efekty a mapové tenzory
+            tracers_p1_np = self.active_tracers_p1.cpu().numpy()
+            tracers_p2_np = self.active_tracers_p2.cpu().numpy()
+            tracers_team_np = self.active_tracers_team.cpu().numpy()
+            heals_p1_np = self.active_heals_p1.cpu().numpy()
+            heals_p2_np = self.active_heals_p2.cpu().numpy()
+            sparks_np = self.hit_sparks.cpu().numpy()
+            armor_sparks_np = self.armor_sparks.cpu().numpy()
+            sniper_lasers_np = self.sniper_lasers.cpu().numpy()
+            smokes_np = self.active_smokes_gpu.cpu().numpy()
+            nodes_np = self.nodes_gpu.cpu().numpy()
+            node_pts_np = self.node_control_points.cpu().numpy()
+            kills_per_faction_list = self.kills_per_faction.cpu().tolist()
+
+        # ==============================================================
+        # NULOVĚ NÁKLADNÁ ROZPOUZDŘENÍ NA CPU (Views na sdružené pole)
+        # ==============================================================
+        pos_np = packed_cpu[:, 0:2]
+        heading_np = packed_cpu[:, 2]
+        hp_np = packed_cpu[:, 3]
+        max_hp_np = packed_cpu[:, 4]
+        teams_np = packed_cpu[:, 5].astype(np.int8)
+        classes_np = packed_cpu[:, 6].astype(np.int8)
+        alive_np = packed_cpu[:, 7] > 0.5
+        suppression_np = packed_cpu[:, 8]
+        in_cover_np = packed_cpu[:, 9] > 0.5
+        reloading_np = packed_cpu[:, 10] > 0.0
+        kinetic_shield_np = packed_cpu[:, 11] > 0.5
+        unit_state_np = packed_cpu[:, 12].astype(np.int32)
+        dmg_dealt_np = packed_cpu[:, 13]
+        dmg_taken_np = packed_cpu[:, 14]
+        kills_np = packed_cpu[:, 15].astype(np.int32)
+        fit_np = packed_cpu[:, 16]
+        heal_np = packed_cpu[:, 17]
+
         generals_meta = []
         for f in range(self.n_factions):
             gen = self.brains.generals[f]
-            f_mask = self.teams == f
-            classes_in_team = self.classes[f_mask].cpu().numpy()
+            classes_in_team = classes_np[teams_np == f]
             comp = [int(np.sum(classes_in_team == c)) for c in range(4)]
             generals_meta.append({
                 "faction_id": f,
@@ -1344,16 +1411,7 @@ class RealisticBattleEngine:
                 "roi_ema": list(gen.class_roi_ema),
             })
 
-        # Živá agregace telemetrie tříd za aktuální bitvu
-        teams_np = self.teams.cpu().numpy()
-        classes_np = self.classes.cpu().numpy()
-        alive_np = alive.cpu().numpy()
-        dmg_dealt_np = self.damage_dealt.cpu().numpy()
-        dmg_taken_np = self.damage_taken.cpu().numpy()
-        kills_np = self.unit_kills.cpu().numpy()
-        fit_np = self.fitness.cpu().numpy()
-        heal_np = self.healing_done.cpu().numpy()
-
+        # Živá agregace telemetrie tříd za aktuální bitvu na CPU
         live_class_stats = []
         for c in range(4):
             c_mask = classes_np == c
@@ -1395,7 +1453,7 @@ class RealisticBattleEngine:
             })
 
         alive_counts = [int(np.sum(alive_np[teams_np == f])) for f in range(self.n_factions)]
-        kills_by_faction = [int(k) for k in self.kills_per_faction.cpu().tolist()]
+        kills_by_faction = [int(k) for k in kills_per_faction_list]
         deaths_by_faction = [
             max(0, int(self.initial_team_counts[f]) - alive_counts[f])
             for f in range(self.n_factions)
@@ -1406,33 +1464,33 @@ class RealisticBattleEngine:
         ]
 
         return {
-            "pos": self.pos.cpu().numpy(),
-            "heading": self.heading.cpu().numpy(),
+            "pos": pos_np,
+            "heading": heading_np,
             "alive_counts": alive_counts,
             "alive_by_class": alive_by_class,
             "kills_by_faction": kills_by_faction,
             "deaths_by_faction": deaths_by_faction,
             "initial_team_counts": list(self.initial_team_counts),
-            "hp": self.hp.cpu().numpy(),
-            "max_hp": self.class_max_hp.cpu().numpy(),
-            "teams": self.teams.cpu().numpy(),
+            "hp": hp_np,
+            "max_hp": max_hp_np,
+            "teams": teams_np,
             "classes": classes_np,
             "alive": alive_np,
-            "suppression": self.suppression.cpu().numpy(),
-            "in_cover": self.in_cover.cpu().numpy(),
-            "reloading": (self.reload_timer > 0.0).cpu().numpy(),
-            "tracers_p1": self.active_tracers_p1.cpu().numpy(),
-            "tracers_p2": self.active_tracers_p2.cpu().numpy(),
-            "tracers_team": self.active_tracers_team.cpu().numpy(),
-            "heals_p1": self.active_heals_p1.cpu().numpy(),
-            "heals_p2": self.active_heals_p2.cpu().numpy(),
-            "sparks": self.hit_sparks.cpu().numpy(),
-            "armor_sparks": self.armor_sparks.cpu().numpy(),
-            "sniper_lasers": self.sniper_lasers.cpu().numpy(),
-            "smokes": self.active_smokes_gpu.cpu().numpy(),
+            "suppression": suppression_np,
+            "in_cover": in_cover_np,
+            "reloading": reloading_np,
+            "tracers_p1": tracers_p1_np,
+            "tracers_p2": tracers_p2_np,
+            "tracers_team": tracers_team_np,
+            "heals_p1": heals_p1_np,
+            "heals_p2": heals_p2_np,
+            "sparks": sparks_np,
+            "armor_sparks": armor_sparks_np,
+            "sniper_lasers": sniper_lasers_np,
+            "smokes": smokes_np,
             "particles": list(self.particles),
-            "nodes": self.nodes_gpu.cpu().numpy(),
-            "node_points": self.node_control_points.cpu().numpy(),
+            "nodes": nodes_np,
+            "node_points": node_pts_np,
             "walls": [list(w) for w in self.current_walls],
             "pillars": self.scenario.pillars,
             "bases": self.scenario.bases,
@@ -1442,8 +1500,8 @@ class RealisticBattleEngine:
             "live_class_stats": live_class_stats,
             "scenario_name": self.scenario.name,
             "faction_techs": [list(t) for t in self.faction_active_techs],
-            "has_kinetic_shield": self.has_kinetic_shield.cpu().numpy() if hasattr(self, "has_kinetic_shield") else np.zeros(self.N, dtype=bool),
-            "unit_state": self.unit_state.cpu().numpy() if hasattr(self, "unit_state") else np.zeros(self.N, dtype=np.int32),
+            "has_kinetic_shield": kinetic_shield_np,
+            "unit_state": unit_state_np,
             "history_avg_fitness": self.brains.history_avg_fitness,
             "history_best_fitness": self.brains.history_best_fitness,
         }
