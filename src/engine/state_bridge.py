@@ -72,10 +72,12 @@ class LockFreeStateBridge:
         self._prev_timestamp = now
         self._curr_timestamp = now
         self._sim_tick_delta = 1.0 / 60.0
-        # Atomický neměnný rámec (prev, curr, t_curr, dt_sim) pro 100% lock-free čtení z GUI
+        self._ema_pub_dt: float = 1.0 / 60.0
+        # Atomický neměnný rámec (prev, curr, t_curr, ema_pub_dt) pro 100% lock-free čtení z GUI
         self._state_frame: tuple | None = None
         self._latest_snapshot: dict | None = None
         self._snapshot_seq: int = 0
+        self._last_consumed_seq: int = 0
         self._latest_snapshot_cache = None
         self._selected_unit_id: int | None = None
         self._auto_select_best: bool = True
@@ -133,7 +135,7 @@ class LockFreeStateBridge:
         return True
 
     def publish_simulation_state(self, raw_state: dict, fixed_dt: float = 1.0 / 60.0):
-        """Volá worker simulační vlákno po každém dokončeném kroku fyziky (atomický swap reference)."""
+        """Volá worker simulační vlákno po dokončení kroků (atomický swap reference + Adaptive EMA dt)."""
         now = time.perf_counter()
         self._snapshot_seq += 1
         raw_state["_seq"] = self._snapshot_seq
@@ -141,6 +143,10 @@ class LockFreeStateBridge:
         curr_prev = self._curr_state
         if self._states_compatible(curr_prev, raw_state):
             new_prev = curr_prev
+            real_dt = now - self._curr_timestamp
+            if 0.001 <= real_dt <= 0.25:
+                clamped_dt = max(1.0 / 120.0, min(0.25, real_dt))
+                self._ema_pub_dt = 0.80 * self._ema_pub_dt + 0.20 * clamped_dt
             self._prev_timestamp = self._curr_timestamp
         else:
             new_prev = raw_state
@@ -149,35 +155,45 @@ class LockFreeStateBridge:
         self._prev_state = new_prev
         self._curr_state = raw_state
         self._curr_timestamp = now
-        self._sim_tick_delta = fixed_dt
+        self._sim_tick_delta = self._ema_pub_dt
 
         # Jediná atomická publikace neměnného páru i nejnovějšího snímku (lock-free pro GUI čtenáře)
-        self._state_frame = (new_prev, raw_state, now, fixed_dt)
+        self._state_frame = (new_prev, raw_state, now, self._ema_pub_dt)
         self._latest_snapshot = raw_state
 
     def publish_snapshot(self, snapshot: dict, fixed_dt: float = 1.0 / 60.0) -> None:
         """Alias pro atomickou publikaci kompletního snapshotu (lock-free double buffer)."""
         self.publish_simulation_state(snapshot, fixed_dt=fixed_dt)
 
+    def is_snapshot_consumed(self) -> bool:
+        """Vrátí True, pokud si GUI vlákno již vyzvedlo poslední publikovaný snapshot."""
+        return self._last_consumed_seq >= self._snapshot_seq
+
     def get_latest_snapshot(self) -> dict | None:
         """Vrátí poslední kompletní snapshot zcela bez zamykání (lock-free)."""
-        return self._latest_snapshot
+        snap = self._latest_snapshot
+        if snap is not None:
+            self._last_consumed_seq = snap.get("_seq", self._last_consumed_seq)
+        return snap
 
     def get_interpolated_state(self) -> dict | None:
         """
         Volá renderovací smyčka (60–180 FPS) zcela bez zámků (lock-free).
-        Čte atomický neměnný rámec (prev, curr, t_curr, dt_sim) a plynule interpoluje pozice a úhly.
+        Čte atomický neměnný rámec (prev, curr, t_curr, ema_pub_dt) a provádí čistou
+        Adaptive Lerp interpolaci v rozsahu [0.0, 1.0] bez přestřelování.
         """
         frame = self._state_frame
         if frame is None:
             return None
 
-        prev, curr, t_curr, dt_sim = frame
+        prev, curr, t_curr, ema_dt = frame
         if curr is None:
             return None
 
+        self._last_consumed_seq = curr.get("_seq", self._last_consumed_seq)
+
         # Pokud ještě nemáme 2 po sobě jdoucí stavy, vrátíme aktuální
-        if prev is None or prev is curr or dt_sim <= 0.0:
+        if prev is None or prev is curr or ema_dt <= 0.0:
             return curr
 
         pos_prev = prev.get("pos")
@@ -193,10 +209,9 @@ class LockFreeStateBridge:
             return snapshot
 
         now = time.perf_counter()
-        # Alpha: kde se renderovací čas nachází mezi t_prev a t_curr
-        # Hodnotu clampujeme do rozsahu [0.0, 1.25] pro drobnou predikci (extrapolaci)
+        # Adaptive Lerp: čistý rozsah [0.0, 1.0] podle reálného klouzavého intervalu publikace
         time_since_curr = now - t_curr
-        alpha = float(np.clip(time_since_curr / max(0.001, dt_sim), 0.0, 1.25))
+        alpha = float(np.clip(time_since_curr / max(0.001, ema_dt), 0.0, 1.0))
 
         # Plynulý Lerp pozic: pos = (1 - a) * prev + a * curr
         interp_pos = (1.0 - alpha) * pos_prev + alpha * pos_curr

@@ -9,6 +9,7 @@ Podporuje 4 třídní schopnosti (řízené tenzorem mozku Action 5 - Ability):
 """
 
 import math
+import numpy as np
 import torch
 from config import (
     CLASS_GRUNT, CLASS_MEDIC, CLASS_SNIPER, CLASS_JUGGERNAUT,
@@ -63,70 +64,75 @@ class CombatSystem:
         if not wants_ability.any():
             return ability_cooldown, active_smokes_gpu, fortress_shield_timer, sniper_focus_timer
 
-        # 3. Sniper: Focus Zaměření (vektorizovaně pro všechny aktivující snipry)
+        # 3. Sniper: Focus Zaměření (vektorizovaně bez alokace full_like)
         sniper_mask = wants_ability & (classes == CLASS_SNIPER)
         if sniper_mask.any():
-            ability_cooldown = torch.where(sniper_mask, torch.full_like(ability_cooldown, 20.0), ability_cooldown)
-            sniper_focus_timer = torch.where(sniper_mask, torch.full_like(sniper_focus_timer, 5.0), sniper_focus_timer)
+            ability_cooldown = torch.where(sniper_mask, 20.0, ability_cooldown)
+            sniper_focus_timer = torch.where(sniper_mask, 5.0, sniper_focus_timer)
             fitness = torch.where(sniper_mask, fitness + 2.0, fitness)
 
-        # 4. Juggernaut: Fortress Shield (vektorizovaně pro všechny aktivující juggernauty)
+        # 4. Juggernaut: Fortress Shield (vektorizovaně bez alokace full_like)
         jugg_mask = wants_ability & (classes == CLASS_JUGGERNAUT)
         if jugg_mask.any():
-            ability_cooldown = torch.where(jugg_mask, torch.full_like(ability_cooldown, 22.0), ability_cooldown)
-            fortress_shield_timer = torch.where(jugg_mask, torch.full_like(fortress_shield_timer, 6.0), fortress_shield_timer)
+            ability_cooldown = torch.where(jugg_mask, 22.0, ability_cooldown)
+            fortress_shield_timer = torch.where(jugg_mask, 6.0, fortress_shield_timer)
             fitness = torch.where(jugg_mask, fitness + 2.5, fitness)
 
-        # 2. Medic: Bio-Pulz
+        # 2. Medic: Bio-Pulz (plně vektorizovaně přes matici (M, N) bez Python smyčky)
         medic_mask = wants_ability & (classes == CLASS_MEDIC)
         if medic_mask.any():
-            ability_cooldown = torch.where(medic_mask, torch.full_like(ability_cooldown, 15.0), ability_cooldown)
+            ability_cooldown = torch.where(medic_mask, 15.0, ability_cooldown)
             med_indices = torch.where(medic_mask)[0]
-            for m_uid in med_indices:
-                f_id = teams[m_uid]
-                m_pos = pos[m_uid:m_uid+1]
-                team_mask = alive & (teams == f_id)
-                if team_mask.any():
-                    t_indices = torch.where(team_mask)[0]
-                    dists = torch.norm(pos[t_indices] - m_pos, dim=1)
-                    in_radius = dists <= 180.0
-                    if in_radius.any():
-                        pulse_targets = t_indices[in_radius]
-                        pulse_amount = 35.0
-                        missing_hp = (class_max_hp[pulse_targets] - hp[pulse_targets]).clamp(min=0.0)
-                        actual_pulse = torch.minimum(torch.full_like(missing_hp, pulse_amount), missing_hp)
+            dists = torch.cdist(pos[med_indices], pos)  # (M, N)
+            in_range = (
+                (dists <= 180.0)
+                & alive.unsqueeze(0)
+                & (teams.unsqueeze(0) == teams[med_indices].unsqueeze(1))
+            )
+            pulse_each = (class_max_hp - hp).clamp(0.0, 35.0)  # (N,)
+            healed_mat = torch.where(in_range, pulse_each.unsqueeze(0), 0.0)  # (M, N)
+            staging_buf.delta_hp += healed_mat.sum(dim=0)
+            total_healed = healed_mat.sum(dim=1)
+            healing_done[med_indices] += total_healed
+            fitness[med_indices] += total_healed * 3.5
 
-                        staging_buf.delta_hp.index_add_(0, pulse_targets, actual_pulse)
-                        total_healed = actual_pulse.sum()
-                        healing_done[m_uid] += total_healed
-                        fitness[m_uid] += total_healed * 3.5
-
-        # 1. Grunt: Taktický kouř
+        # 1. Grunt: Taktický kouř (dávkový přenos bez .item() uvnitř smyčky)
         grunt_mask = wants_ability & (classes == CLASS_GRUNT)
         if grunt_mask.any():
             grunt_indices = torch.where(grunt_mask)[0]
+            g_ids_cpu = grunt_indices.detach().cpu().numpy()
+            g_teams_cpu = teams[grunt_indices].detach().cpu().numpy()
+            g_pos_cpu = pos[grunt_indices].detach().cpu().numpy()
+
+            team_smoke_counts = [0, 0, 0, 0]
+            if active_smokes_gpu.shape[0] > 0:
+                smoke_teams_cpu = active_smokes_gpu[:, 4].detach().cpu().numpy()
+                for st in smoke_teams_cpu:
+                    ti = int(st)
+                    if 0 <= ti < 4:
+                        team_smoke_counts[ti] += 1
+
             new_smokes = []
-            for g_uid in grunt_indices:
-                uid = int(g_uid.item())
-                f_id = int(teams[uid].item())
-                team_smokes = 0
-                if active_smokes_gpu.shape[0] > 0:
-                    team_smokes = int((active_smokes_gpu[:, 4] == float(f_id)).sum().item())
-                if team_smokes < 3:
+            activated_uids = []
+            for idx_g in range(len(g_ids_cpu)):
+                uid = int(g_ids_cpu[idx_g])
+                f_id = int(g_teams_cpu[idx_g])
+                if 0 <= f_id < 4 and team_smoke_counts[f_id] < 3:
                     radius = 55.0
                     duration = 6.0
                     if faction_techs and TECH_AEROSOL in faction_techs[f_id]:
                         radius *= 1.40
                         duration *= 1.25
 
-                    ux, uy = float(pos[uid, 0].item()), float(pos[uid, 1].item())
+                    ux = float(g_pos_cpu[idx_g, 0])
+                    uy = float(g_pos_cpu[idx_g, 1])
                     new_smokes.append([ux, uy, radius, duration, float(f_id)])
-                    ability_cooldown[uid] = 18.0
+                    activated_uids.append(uid)
 
                     if visual_mode and particles is not None:
                         for _ in range(8):
-                            ang = float(torch.rand(1).item() * 2 * math.pi)
-                            spd = float(torch.rand(1).item() * 2.0 + 0.5)
+                            ang = float(np.random.rand() * 2.0 * math.pi)
+                            spd = float(np.random.rand() * 2.0 + 0.5)
                             particles.append({
                                 "x": ux, "y": uy,
                                 "vx": math.cos(ang) * spd,
@@ -134,6 +140,9 @@ class CombatSystem:
                                 "life": 1.2,
                                 "col": (120, 140, 130),
                             })
+            if activated_uids:
+                act_t = torch.tensor(activated_uids, dtype=torch.long, device=self.device)
+                ability_cooldown[act_t] = 18.0
             if new_smokes:
                 new_t = torch.tensor(new_smokes, dtype=torch.float32, device=self.device)
                 active_smokes_gpu = torch.cat([active_smokes_gpu, new_t], dim=0)

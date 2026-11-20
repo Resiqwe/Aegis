@@ -543,15 +543,30 @@ class RealisticBattleEngine:
         under_fire_in_cover = alive & self.in_cover & (self.suppression > 0.25)
         self.fitness = torch.where(under_fire_in_cover, self.fitness + 0.15, self.fitness)
 
-        # Detekce nepřátel a spojenců
-        dir_enemy = torch.zeros((N, 2), dtype=torch.float32, device=self.device)
-        dist_enemy = torch.full((N,), 9999.0, dtype=torch.float32, device=self.device)
-        target_enemy = torch.full((N,), -1, dtype=torch.long, device=self.device)
-        medic_patient_dir = torch.zeros((N, 2), dtype=torch.float32, device=self.device)
-        medic_has_patient = torch.zeros((N,), dtype=torch.bool, device=self.device)
+        # Detekce nepřátel a spojenců (předalokované buffery s automatickou změnou velikosti při změně N)
+        if not hasattr(self, "_buf_dir_enemy") or self._buf_dir_enemy.shape[0] != N:
+            self._buf_dir_enemy = torch.zeros((N, 2), dtype=torch.float32, device=self.device)
+            self._buf_dist_enemy = torch.full((N,), 9999.0, dtype=torch.float32, device=self.device)
+            self._buf_target_enemy = torch.full((N,), -1, dtype=torch.long, device=self.device)
+            self._buf_medic_patient_dir = torch.zeros((N, 2), dtype=torch.float32, device=self.device)
+            self._buf_medic_has_patient = torch.zeros((N,), dtype=torch.bool, device=self.device)
+            self._empty_xy = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
+            self._empty_i8 = torch.zeros((0,), dtype=torch.int8, device=self.device)
+        else:
+            self._buf_dir_enemy.zero_()
+            self._buf_dist_enemy.fill_(9999.0)
+            self._buf_target_enemy.fill_(-1)
+            self._buf_medic_patient_dir.zero_()
+            self._buf_medic_has_patient.zero_()
 
-        self.active_heals_p1 = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
-        self.active_heals_p2 = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
+        dir_enemy = self._buf_dir_enemy
+        dist_enemy = self._buf_dist_enemy
+        target_enemy = self._buf_target_enemy
+        medic_patient_dir = self._buf_medic_patient_dir
+        medic_has_patient = self._buf_medic_has_patient
+
+        self.active_heals_p1 = self._empty_xy
+        self.active_heals_p2 = self._empty_xy
 
         if K > 1:
             p_alive = self.pos[alive_idx]
@@ -560,31 +575,29 @@ class RealisticBattleEngine:
             diff_all = p_alive.unsqueeze(0) - p_alive.unsqueeze(1)
             same_team = t_alive.unsqueeze(1) == t_alive.unsqueeze(0)
 
-            head_alive = self.heading[alive_idx]
-            angle_to_tar = torch.atan2(diff_all[:, :, 1], diff_all[:, :, 0])
-            angle_diff = (angle_to_tar - head_alive.unsqueeze(1) + math.pi) % (2.0 * math.pi) - math.pi
-            in_fov = torch.abs(angle_diff) < (math.radians(140) * 0.5)
-
-            # Reálný zrakový dosah podle specializace vojáka (Zákaz spatření cíle přes celou mapu na 2000 px)
-            c_alive = self.classes[alive_idx]
-            # Pěšák: 380px, Medik: 320px, Sniper: 680px, Juggernaut: 380px
-            max_vis = self.CONST_CLASS_MAX_VIS[c_alive.long()].unsqueeze(1)
-
-            # TECH_RADAR: +25% dosah viditelnosti pro frakce s odemčeným radarem
-            for f in range(self.n_factions):
-                if 1 in self.faction_active_techs[f]:  # TECH_RADAR = 1
-                    f_in_alive = t_alive == f
-                    if f_in_alive.any():
-                        max_vis[f_in_alive] *= 1.25
-
-            # Proximitní slyšení kroků za zády povoleno pouze na kontaktní vzdálenost do 75 px
-            can_spot = (~same_team) & (dist_mat <= max_vis) & (in_fov | (dist_mat < 75.0))
-            vis_dists = torch.where(can_spot, dist_mat, torch.full_like(dist_mat, 9999.0))
-
-            # Analytické ověření Line-of-Sight (Zákaz Wallhacku / koukání zkrze zdi a překážky):
-            # Amortizace: plný prostorový raycast provádíme každé 2-3 ticky, v mezikrocích držíme platnou viditelnost
+            # Analytické ověření Line-of-Sight (Zákaz Wallhacku / koukání skrze zdi a překážky):
+            # Amortizace: plný O(K^2) výpočet FOV + raycast provádíme pouze každý 3. tick!
             need_full_los = (self.tick_counter % 3 == 0) or not hasattr(self, "_cached_target_enemy")
             if need_full_los:
+                head_alive = self.heading[alive_idx]
+                angle_to_tar = torch.atan2(diff_all[:, :, 1], diff_all[:, :, 0])
+                angle_diff = (angle_to_tar - head_alive.unsqueeze(1) + math.pi) % (2.0 * math.pi) - math.pi
+                in_fov = torch.abs(angle_diff) < (math.radians(140) * 0.5)
+
+                c_alive = self.classes[alive_idx]
+                max_vis = self.CONST_CLASS_MAX_VIS[c_alive.long()].unsqueeze(1)
+
+                # TECH_RADAR: +25% dosah viditelnosti pro frakce s odemčeným radarem
+                for f in range(self.n_factions):
+                    if 1 in self.faction_active_techs[f]:  # TECH_RADAR = 1
+                        f_in_alive = t_alive == f
+                        if f_in_alive.any():
+                            max_vis[f_in_alive] *= 1.25
+
+                # Proximitní slyšení kroků za zády povoleno pouze na kontaktní vzdálenost do 75 px
+                can_spot = (~same_team) & (dist_mat <= max_vis) & (in_fov | (dist_mat < 75.0))
+                vis_dists = torch.where(can_spot, dist_mat, 9999.0)
+
                 top_k = min(4, vis_dists.shape[1])
                 vals, args = torch.topk(vis_dists, k=top_k, dim=1, largest=False)
 
@@ -610,12 +623,12 @@ class RealisticBattleEngine:
                 best_dist = vals[unit_arange, first_col]
 
                 # target_enemy má platné ID POUZE pokud má jednotka ověřenou přímou viditelnost (has_los == True)
-                target_enemy[alive_idx] = torch.where(has_los, alive_idx[best_t], torch.full_like(alive_idx, -1))
-                dist_enemy[alive_idx] = torch.where(has_los, best_dist, torch.full_like(best_dist, 9999.0))
+                target_enemy[alive_idx] = torch.where(has_los, alive_idx[best_t], -1)
+                dist_enemy[alive_idx] = torch.where(has_los, best_dist, 9999.0)
 
                 e_vec = p_alive[best_t] - p_alive
                 direct_dir = e_vec / best_dist.unsqueeze(1).clamp(min=1.0)
-                dir_enemy[alive_idx] = torch.where(has_los.unsqueeze(1), direct_dir, torch.zeros_like(direct_dir))
+                dir_enemy[alive_idx] = torch.where(has_los.unsqueeze(1), direct_dir, 0.0)
 
                 self.has_los_target = torch.zeros((N,), dtype=torch.bool, device=self.device)
                 self.has_los_target[alive_idx] = has_los
@@ -625,7 +638,7 @@ class RealisticBattleEngine:
                 self._cached_dir_enemy = dir_enemy.clone()
             else:
                 # Rychlé aktualizování vzdálenosti a směru k dříve zaměřeným cílům bez drahého raycastu
-                target_enemy = self._cached_target_enemy.clone()
+                target_enemy.copy_(self._cached_target_enemy)
                 has_cached_tar = (target_enemy >= 0) & alive & (target_enemy < N)
                 if has_cached_tar.any():
                     c_idx = torch.where(has_cached_tar)[0]
@@ -873,7 +886,7 @@ class RealisticBattleEngine:
         engage_utility = torch.where(
             has_combat_target & (torch.abs(aim_diff) < math.radians(45)),
             1.20 + (1.0 - self.suppression) * 0.80,
-            torch.zeros_like(self.suppression)
+            0.0,
         )
         utility[:, STATE_ENGAGE] = engage_utility
 
@@ -881,7 +894,7 @@ class RealisticBattleEngine:
         retreat_utility = torch.where(
             (~self.in_cover) & ((self.suppression > 0.40) | (self.hp < self.class_max_hp * 0.35)),
             1.60 + self.suppression * 0.90,
-            torch.zeros_like(self.suppression)
+            0.0,
         )
         utility[:, STATE_COVER_RETREAT] = retreat_utility
 
@@ -889,8 +902,8 @@ class RealisticBattleEngine:
         is_sniper_cls = u_classes == CLASS_SNIPER
         sniper_lock_utility = torch.where(
             is_sniper_cls & has_combat_target & (self.ammo_in_mag > 0),
-            2.80, # Převálcuje pohyb i retreat
-            torch.zeros_like(self.suppression)
+            2.80,
+            0.0,
         )
         utility[:, STATE_SNIPER_LOCK] = sniper_lock_utility
 
@@ -898,8 +911,8 @@ class RealisticBattleEngine:
         is_medic_cls = u_classes == CLASS_MEDIC
         medic_heal_utility = torch.where(
             is_medic_cls & medic_has_patient,
-            3.00, # Absolutní priorita záchrany života
-            torch.zeros_like(self.suppression)
+            3.00,
+            0.0,
         )
         utility[:, STATE_TRIAGE_HEAL] = medic_heal_utility
 
@@ -907,8 +920,8 @@ class RealisticBattleEngine:
         is_jugg_cls = u_classes == CLASS_JUGGERNAUT
         jugg_push_utility = torch.where(
             is_jugg_cls & alive,
-            1.90, # Převáží Cover Retreat
-            torch.zeros_like(self.suppression)
+            1.90,
+            0.0,
         )
         utility[:, STATE_FORTRESS_PUSH] = jugg_push_utility
 
@@ -946,28 +959,23 @@ class RealisticBattleEngine:
         spin_penalty = torch.where((lin_speed < 0.20) & (~has_combat_target) & alive, omega.abs() * 0.18, torch.zeros_like(omega))
         self.fitness -= spin_penalty
 
-        # Okamžitá ztráta zaměření cíle, pokud se voják otočil jinam a cíl opustil jeho zorné pole (FOV kužel)
+        # Okamžitá ztráta zaměření cíle mimo FOV kužel (100 % bezvětveně na GPU bez .any()/nonzero)
         has_tar = (target_enemy >= 0) & (target_enemy < self.N) & alive
-        if has_tar.any():
-            tar_idx_check = torch.where(has_tar)[0]
-            tar_p = self.pos[target_enemy[tar_idx_check]]
-            tar_v = tar_p - self.pos[tar_idx_check]
-            tar_d = torch.norm(tar_v, dim=1)
-            tar_a = torch.atan2(tar_v[:, 1], tar_v[:, 0])
-            tar_diff = (tar_a - self.heading[tar_idx_check] + math.pi) % (2.0 * math.pi) - math.pi
-            lost_fov = (tar_d > 75.0) & (torch.abs(tar_diff) >= (math.radians(140) * 0.5))
-            if lost_fov.any():
-                lost_idx = tar_idx_check[lost_fov]
-                target_enemy[lost_idx] = -1
-                dist_enemy[lost_idx] = 9999.0
-                dir_enemy[lost_idx] = 0.0
-                self.has_los_target[lost_idx] = False
+        tar_safe = target_enemy.clamp(0, max(0, N - 1))
+        tar_v = self.pos[tar_safe] - self.pos
+        tar_d = torch.norm(tar_v, dim=1)
+        tar_a = torch.atan2(tar_v[:, 1], tar_v[:, 0])
+        tar_diff = (tar_a - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+        lost_fov = has_tar & (tar_d > 75.0) & (torch.abs(tar_diff) >= (math.radians(140) * 0.5))
+
+        target_enemy = torch.where(lost_fov, -1, target_enemy)
+        dist_enemy = torch.where(lost_fov, 9999.0, dist_enemy)
+        dir_enemy = torch.where(lost_fov.unsqueeze(1), 0.0, dir_enemy)
+        self.has_los_target = self.has_los_target & (~lost_fov)
 
         self.last_target_enemy = target_enemy
 
         # DETERMINISTICKÝ AUTOMAT PŘEBÍJENÍ (Bez zbytečného zatěžování mozku přebíjením):
-        # Jakmile dojde munice, stavový stroj okamžitě zahájí taktické přebití.
-        # Také pokud je voják v krytu a v zásobníku chybí >50% munice, bezpečně dobije.
         empty_mag = self.ammo_in_mag <= 0
         tactical_cover_reload = self.in_cover & (self.ammo_in_mag < self.class_mag_size * 0.45) & (~has_combat_target)
         start_reload = alive & (empty_mag | tactical_cover_reload) & (self.reload_timer <= 0.0) & (self.ammo_in_mag < self.class_mag_size)
@@ -975,19 +983,10 @@ class RealisticBattleEngine:
 
         # Střelba: Výstup 3 je Trigger (Sigmoid [0, 1] > 0.58)
         self.cooldown = (self.cooldown - 1).clamp(min=0)
-    
-        tar_for_shoot = target_enemy
-        valid_tar = (tar_for_shoot >= 0) & (tar_for_shoot < self.N)
-        valid_tar_idx = torch.where(alive & valid_tar)[0]
 
-        on_target = torch.zeros((N,), dtype=torch.bool, device=self.device)
-        if valid_tar_idx.numel() > 0:
-            tar_pos_valid = self.pos[tar_for_shoot[valid_tar_idx]]
-            fire_vec = tar_pos_valid - self.pos[valid_tar_idx]
-            fire_ang = torch.atan2(fire_vec[:, 1], fire_vec[:, 0])
-            aim_diff = (fire_ang - self.heading[valid_tar_idx] + math.pi) % (2.0 * math.pi) - math.pi
-            # Zbraň střílí pouze dopředu v kuželu +-45 stupňů od osy vojáka
-            on_target[valid_tar_idx] = torch.abs(aim_diff) < math.radians(45)
+        valid_tar = (target_enemy >= 0) & (target_enemy < self.N)
+        # tar_diff už máme spočítaný ze stejných pozic a headingů výše -> 0 duplicitních atan2/nonzero!
+        on_target = alive & valid_tar & (torch.abs(tar_diff) < math.radians(45))
 
         # Trigger je nyní čistý Sigmoid práh > 0.58 z výstupu 3
         brain_trigger = brain_out[:, 3] > 0.58
@@ -1005,11 +1004,11 @@ class RealisticBattleEngine:
         )
         shooters = torch.where(can_fire)[0]
 
-        self.active_tracers_p1 = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
-        self.active_tracers_p2 = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
-        self.active_tracers_team = torch.zeros((0,), dtype=torch.int8, device=self.device)
-        self.hit_sparks = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
-        self.armor_sparks = torch.zeros((0, 2), dtype=torch.float32, device=self.device)
+        self.active_tracers_p1 = self._empty_xy
+        self.active_tracers_p2 = self._empty_xy
+        self.active_tracers_team = self._empty_i8
+        self.hit_sparks = self._empty_xy
+        self.armor_sparks = self._empty_xy
 
         if shooters.numel() > 0:
             targets = target_enemy[shooters]

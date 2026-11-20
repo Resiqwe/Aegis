@@ -147,7 +147,7 @@ class AsyncSimulationWorker:
         accumulator = 0.0
         sim_dt = self.fixed_dt
         last_snap_time = 0.0
-        snap_interval = 1.0 / 30.0  # Maximálně 30 snapshotů za sekundu (odlehčení PCIe a GILu)
+        snap_interval = 1.0 / 60.0  # Strop 60 Hz + demand-driven publikace (jen když si GUI snímek vyzvedlo)
 
         # Počáteční publikace stavu
         initial_state = self._build_snapshot()
@@ -166,13 +166,23 @@ class AsyncSimulationWorker:
                 # Vykonáme odpovídající počet diskrétních kroků fyziky se stabilním dt = 1/60s
                 steps_done = 0
                 max_substeps = max(1, int(round(self.speed_multiplier * 4)))
+                orig_visual_mode = bool(getattr(self.engine, "visual_mode", False))
 
                 while accumulator >= sim_dt and steps_done < max_substeps and not self._stop_requested.is_set():
+                    now_step = time.perf_counter()
+                    since_snap = now_step - last_snap_time
+                    gui_ready = self.bridge.is_snapshot_consumed() or since_snap >= 0.25
+                    will_publish = (since_snap >= snap_interval) and gui_ready
+
+                    # V režimu zrychlení vypneme drahé CPU částice/efekty pro nevykreslené mezikroky
+                    if orig_visual_mode:
+                        self.engine.visual_mode = will_publish
+
                     t_step0 = time.perf_counter()
-                    
+
                     # 1. Krok jádra
                     self.engine.step(sim_dt)
-                    
+
                     t_step1 = time.perf_counter()
                     step_dur = (t_step1 - t_step0) * 1000.0
                     worker_prof.record("sim_step_ms", step_dur)
@@ -182,17 +192,21 @@ class AsyncSimulationWorker:
                     steps_done += 1
                     self._step_counter += 1
 
-                # 2. Publikace do Lock-free mostu (omezeno na 30 Hz pro plynulost plátna a nulový GIL stall)
-                now_curr = time.perf_counter()
-                if (now_curr - last_snap_time) >= snap_interval and steps_done > 0:
-                    t_snap0 = time.perf_counter()
-                    raw_snapshot = self._build_snapshot()
-                    t_snap1 = time.perf_counter()
-                    snap_dur = (t_snap1 - t_snap0) * 1000.0
-                    worker_prof.record("snapshot_ms", snap_dur)
+                    # 2. Demand-driven publikace přímo uvnitř smyčky (žádné čekání na konec dávky!)
+                    now_curr = time.perf_counter()
+                    since_snap_post = now_curr - last_snap_time
+                    if will_publish or (since_snap_post >= snap_interval and (self.bridge.is_snapshot_consumed() or since_snap_post >= 0.25)):
+                        t_snap0 = time.perf_counter()
+                        raw_snapshot = self._build_snapshot()
+                        t_snap1 = time.perf_counter()
+                        snap_dur = (t_snap1 - t_snap0) * 1000.0
+                        worker_prof.record("snapshot_ms", snap_dur)
 
-                    self.bridge.publish_simulation_state(raw_snapshot, sim_dt)
-                    last_snap_time = now_curr
+                        self.bridge.publish_simulation_state(raw_snapshot, sim_dt)
+                        last_snap_time = now_curr
+
+                if orig_visual_mode:
+                    self.engine.visual_mode = True
 
                 # Ochrana proti zpoždění při minimalizaci okna / alt-tabu
                 if accumulator > 0.20:

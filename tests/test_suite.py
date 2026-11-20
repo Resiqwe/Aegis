@@ -12,6 +12,7 @@ Ověřuje:
 
 import os
 import sys
+import tempfile
 import time
 import unittest
 import torch
@@ -158,80 +159,81 @@ class TestCyberTacticsSuite(unittest.TestCase):
 
     def test_06_snapshot_roundtrip(self):
         """Ověření uložení a načtení snapshotu s 3-vrstvou vahovou strukturou."""
-        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
-        engine.configure(400, 4)
-        telemetry = telemetry_logger.TelemetryManager("telemetry")
-        
-        snap_path = telemetry.save_snapshot(engine)
-        self.assertTrue(os.path.exists(snap_path))
-        
-        # Načtení do nového enginu
-        engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
-        engine2.configure(400, 4)
-        ok = telemetry.load_snapshot(engine2, snap_path)
-        self.assertTrue(ok)
-        
-        # Vyčištění testovacího snapshotu
-        try:
-            os.remove(snap_path)
-        except Exception:
-            pass
-        telemetry.shutdown(wait=True)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine.configure(400, 4)
+            telemetry = telemetry_logger.TelemetryManager(tmp_dir)
+
+            snap_path = telemetry.save_snapshot(engine)
+            self.assertTrue(os.path.exists(snap_path))
+
+            # Načtení do nového enginu
+            engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine2.configure(400, 4)
+            ok = telemetry.load_snapshot(engine2, snap_path)
+            self.assertTrue(ok)
+
+            telemetry.shutdown(wait=True)
 
     def test_07_async_snapshot_pipeline(self):
-        """Ověření Fáze 1: asynchronní ukládání snapshotu přes worker, debounce, atomický zápis a načtení."""
-        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
-        engine.configure(400, 4)
-        telemetry = telemetry_logger.TelemetryManager("telemetry")
-        engine.telemetry_mgr = telemetry
+        """Ověření Fáze 1: asynchronní ukládání přes worker, reálný debounce, shutdown + restart a načtení."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine.configure(400, 4)
+            telemetry = telemetry_logger.TelemetryManager(tmp_dir)
+            engine.telemetry_mgr = telemetry
 
-        bridge = LockFreeStateBridge()
-        worker = AsyncSimulationWorker(engine, bridge)
-        worker.start()
+            bridge = LockFreeStateBridge()
+            worker = AsyncSimulationWorker(engine, bridge)
+            worker.start()
 
-        # Pošleme 2 požadavky rychle za sebou a ověříme doručení banneru i vytvoření souboru
-        worker.post_command("save_snapshot", "async_test")
-        banners = []
-        deadline = time.perf_counter() + 5.0
-        while time.perf_counter() < deadline:
+            # Pošleme 3 příkazy hned za sebou -> 1. se uloží, další musí zachytit debounce ([INFO])
+            worker.post_command("save_snapshot", "async_test")
+            worker.post_command("save_snapshot", "async_test")
+            worker.post_command("save_snapshot", "async_test")
+
+            banners = []
+            deadline = time.perf_counter() + 5.0
+            while time.perf_counter() < deadline:
+                banners.extend(bridge.pop_banners())
+                if any("[ULOZIT]" in b for b in banners) and any("[INFO]" in b for b in banners):
+                    break
+                time.sleep(0.05)
+
+            worker.stop()
             banners.extend(bridge.pop_banners())
-            if any("[ULOZIT]" in b for b in banners):
-                break
-            time.sleep(0.05)
 
-        worker.stop()
+            save_banners = [b for b in banners if "[ULOZIT]" in b]
+            info_banners = [b for b in banners if "[INFO]" in b]
+            self.assertGreaterEqual(len(save_banners), 1, f"Chybí potvrzovací banner [ULOZIT], získáno: {banners}")
+            self.assertGreaterEqual(len(info_banners), 1, f"Chybí debounce banner [INFO], získáno: {banners}")
 
-        save_banners = [b for b in banners if "[ULOZIT]" in b]
-        self.assertEqual(len(save_banners), 1, f"Očekáván 1 potvrzovací banner, získáno: {banners}")
+            snaps = [p for p in telemetry.list_available_snapshots() if "async_test" in os.path.basename(p)]
+            self.assertTrue(len(snaps) >= 1, "Asynchronní snapshot nebyl nalezen na disku.")
+            snap_path = snaps[0]
+            self.assertFalse(os.path.exists(snap_path + ".tmp"), "Dočasný .tmp soubor nesmí zůstat na disku.")
 
-        snaps = [p for p in telemetry.list_available_snapshots() if "async_test" in os.path.basename(p)]
-        self.assertTrue(len(snaps) >= 1, "Asynchronní snapshot nebyl nalezen na disku.")
-        snap_path = snaps[0]
-        self.assertFalse(os.path.exists(snap_path + ".tmp"), "Dočasný .tmp soubor nesmí zůstat na disku.")
+            # Ověření, že neobsahuje duplicitní klíče brains_W1 a jde načíst zpět
+            raw = torch.load(snap_path, map_location="cpu", weights_only=False)
+            self.assertIn("brains_W1_full", raw)
+            self.assertNotIn("brains_W1", raw)
 
-        # Ověření, že neobsahuje duplicitní klíče brains_W1 a jde načíst zpět
-        raw = torch.load(snap_path, map_location="cpu", weights_only=False)
-        self.assertIn("brains_W1_full", raw)
-        self.assertNotIn("brains_W1", raw)
+            engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine2.configure(400, 4)
+            self.assertTrue(telemetry.load_snapshot(engine2, snap_path))
 
-        engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
-        engine2.configure(400, 4)
-        self.assertTrue(telemetry.load_snapshot(engine2, snap_path))
-
-        # Ověření debounce pojistky (_save_in_progress)
-        with telemetry._io_lock:
-            telemetry._save_in_progress = True
-        try:
-            self.assertFalse(telemetry.save_snapshot_async(engine, "debounce_blocked"))
-        finally:
-            with telemetry._io_lock:
-                telemetry._save_in_progress = False
-
-        try:
-            os.remove(snap_path)
-        except Exception:
-            pass
-        telemetry.shutdown(wait=True)
+            # Ověření znovupoužití save_snapshot_async() po předchozím shutdown(wait=True)
+            telemetry.shutdown(wait=True)
+            completed_paths = []
+            started_after_shutdown = telemetry.save_snapshot_async(
+                engine,
+                "after_shutdown",
+                on_complete=lambda p: completed_paths.append(p),
+            )
+            self.assertTrue(started_after_shutdown, "save_snapshot_async() musí fungovat i po shutdown().")
+            telemetry.shutdown(wait=True)
+            self.assertEqual(len(completed_paths), 1)
+            self.assertTrue(os.path.exists(completed_paths[0]))
 
     def test_08_lock_free_double_buffer_and_staging(self):
         """Ověření Fáze 3: 2-fázový Stage -> Format snapshot, inspekce na CPU a lock-free čtení z mostu."""
@@ -299,6 +301,96 @@ class TestCyberTacticsSuite(unittest.TestCase):
             int(engine.kills_per_faction.sum().item()),
             int(engine.unit_kills.sum().item()),
         )
+
+    def test_10_reconfigure_and_concurrent_snapshot(self):
+        """Ověření souběžné změny počtu jednotek (400 -> 800), čtení Lerp stavu a ukládání snapshotu."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine.configure(400, 4)
+            telemetry = telemetry_logger.TelemetryManager(tmp_dir)
+            engine.telemetry_mgr = telemetry
+
+            bridge = LockFreeStateBridge()
+            worker = AsyncSimulationWorker(engine, bridge)
+            worker.start()
+
+            # Necháme běžet pár kroků se 400 jednotkami
+            time.sleep(0.10)
+            state_before = bridge.get_interpolated_state()
+            self.assertIsNotNone(state_before)
+
+            # Za běhu přepneme na 800 jednotek a hned uložíme snapshot
+            worker.post_command("configure", 800, 4)
+            worker.post_command("save_snapshot", "reconf_800")
+
+            banners = []
+            saw_800 = False
+            deadline = time.perf_counter() + 6.0
+            while time.perf_counter() < deadline:
+                state = bridge.get_interpolated_state()
+                if state is not None:
+                    pos = state.get("pos")
+                    self.assertIsNotNone(pos)
+                    self.assertEqual(pos.shape[0], state["N"])
+                    if state["N"] >= 400 and pos.shape[0] > state_before["N"]:
+                        saw_800 = True
+                banners.extend(bridge.pop_banners())
+                if saw_800 and any("[ULOZIT]" in b for b in banners):
+                    break
+                time.sleep(0.02)
+
+            worker.stop()
+            banners.extend(bridge.pop_banners())
+
+            self.assertTrue(saw_800, "Most nepublikoval stav po rekonfiguraci na 800 jednotek.")
+            self.assertTrue(
+                any("[ULOZIT]" in b for b in banners),
+                f"Chybí potvrzovací banner po rekonfiguraci, získáno: {banners}",
+            )
+
+            snaps = [p for p in telemetry.list_available_snapshots() if "reconf_800" in os.path.basename(p)]
+            self.assertGreaterEqual(len(snaps), 1)
+            engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+            engine2.configure(400, 4)
+            self.assertTrue(telemetry.load_snapshot(engine2, snaps[0]))
+            telemetry.shutdown(wait=True)
+
+    def test_11_adaptive_lerp_and_demand_driven_publish(self):
+        """Ověření Adaptive Lerp ([0.0, 1.0] dle ema_pub_dt) a demand-driven sledování vyzvednutí snímku."""
+        import numpy as np
+
+        bridge = LockFreeStateBridge()
+        s1 = {
+            "pos": np.array([[0.0, 0.0]], dtype=np.float32),
+            "heading": np.array([0.0], dtype=np.float32),
+            "operation_id": 1,
+            "current_epoch": 1,
+            "scenario_idx": 0,
+        }
+        s2 = {
+            "pos": np.array([[10.0, 0.0]], dtype=np.float32),
+            "heading": np.array([0.5], dtype=np.float32),
+            "operation_id": 1,
+            "current_epoch": 1,
+            "scenario_idx": 0,
+        }
+
+        bridge.publish_simulation_state(s1)
+        self.assertFalse(bridge.is_snapshot_consumed())
+        _ = bridge.get_interpolated_state()
+        self.assertTrue(bridge.is_snapshot_consumed())
+
+        # Simulujeme pomalejší interval publikace (~50 ms) a ověříme adaptaci EMA dt + clamp alpha <= 1.0
+        time.sleep(0.05)
+        bridge.publish_simulation_state(s2)
+        self.assertFalse(bridge.is_snapshot_consumed())
+        self.assertGreater(bridge._ema_pub_dt, 1.0 / 60.0)
+
+        time.sleep(0.08)
+        interp = bridge.get_interpolated_state()
+        self.assertTrue(bridge.is_snapshot_consumed())
+        self.assertGreaterEqual(interp["lerp_alpha"], 0.0)
+        self.assertLessEqual(interp["lerp_alpha"], 1.0)
 
 
 if __name__ == "__main__":
