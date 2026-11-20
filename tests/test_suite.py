@@ -233,6 +233,44 @@ class TestCyberTacticsSuite(unittest.TestCase):
             pass
         telemetry.shutdown(wait=True)
 
+    def test_08_lock_free_double_buffer_and_staging(self):
+        """Ověření Fáze 3: 2-fázový Stage -> Format snapshot, inspekce na CPU a lock-free čtení z mostu."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(800, 4)
+        engine.step(1.0 / 60.0)
+
+        # Změříme dobu staging fáze pod zámkem (po warm-upu)
+        _ = engine.extract_raw_telemetry_state(target_id=None, auto_best=True, include_inspection=True)
+        t0 = time.perf_counter()
+        raw = engine.extract_raw_telemetry_state(target_id=None, auto_best=True, include_inspection=True)
+        stage_ms = (time.perf_counter() - t0) * 1000.0
+        print(f"\n[Test 08] Stage lock time (800 units): {stage_ms:.2f} ms")
+
+        snap = engine_core.format_battle_snapshot(raw)
+        insp = engine_core.format_inspected_unit(raw)
+        self.assertIsNotNone(insp)
+        self.assertIn("unit_idx", insp)
+        self.assertIn("decision_flow", insp)
+        self.assertIn("live_class_stats", snap)
+
+        # Ověření lock-free publikace a čtení v LockFreeStateBridge
+        bridge = LockFreeStateBridge()
+        bridge.publish_snapshot(snap)
+        latest = bridge.get_latest_snapshot()
+        self.assertIs(latest, snap)
+        self.assertEqual(latest["_seq"], 1)
+
+        interp = bridge.get_interpolated_state()
+        self.assertIsNotNone(interp)
+        self.assertEqual(interp["_seq"], 1)
+
+        # Druhá publikace posune sekvenční číslo a povolí Lerp
+        snap2 = dict(snap)
+        bridge.publish_snapshot(snap2)
+        self.assertEqual(bridge.get_latest_snapshot()["_seq"], 2)
+        interp2 = bridge.get_interpolated_state()
+        self.assertTrue(interp2.get("is_interpolated", False))
+
 
 if __name__ == "__main__":
     unittest.main()

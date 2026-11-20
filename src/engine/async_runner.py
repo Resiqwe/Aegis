@@ -116,23 +116,28 @@ class AsyncSimulationWorker:
                 print(f"[AsyncSimulationWorker] Chyba při zpracování příkazu {cmd_name}: {e}")
 
     def _build_snapshot(self) -> dict:
-        """Sestaví kompletní CPU snapshot včetně inspekce sledované jednotky pod jedním zámkem."""
+        """
+        2-fázové sestavení snapshotu (Stage -> Format):
+        1. Minimální kritická sekce pod _engine_lock (< 0.3 ms) - jen kopie z GPU na CPU.
+        2. Čistě CPU formátování slovníku a inspekce jednotky mimo zámek.
+        """
         target_id, auto_best = self.bridge.get_selected_unit_request()
+
+        t_stage0 = time.perf_counter()
         with self.engine._engine_lock:
-            snapshot = self.engine.get_battle_state_snapshot()
-            if (
-                auto_best
-                or target_id is None
-                or not (0 <= target_id < self.engine.N)
-                or float(self.engine.hp[target_id].item()) <= 0.0
-            ):
-                resolved_id = self.engine.get_best_alive_unit()
-            else:
-                resolved_id = target_id
-            inspected = self.engine.inspect_unit(resolved_id)
-            snapshot["inspected_unit"] = inspected
-            snapshot["selected_unit_id"] = inspected["unit_idx"] if inspected is not None else None
-            return snapshot
+            raw_state = self.engine.extract_raw_telemetry_state(
+                target_id=target_id,
+                auto_best=auto_best,
+                include_inspection=True,
+            )
+        worker_prof.record("stage_lock_ms", (time.perf_counter() - t_stage0) * 1000.0)
+
+        from engine_core import format_battle_snapshot, format_inspected_unit
+        snapshot = format_battle_snapshot(raw_state)
+        inspected = format_inspected_unit(raw_state)
+        snapshot["inspected_unit"] = inspected
+        snapshot["selected_unit_id"] = inspected["unit_idx"] if inspected is not None else None
+        return snapshot
 
     def _worker_loop(self):
         """

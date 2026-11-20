@@ -66,11 +66,16 @@ class LockFreeStateBridge:
     """
     def __init__(self):
         self._lock = threading.Lock()
+        now = time.perf_counter()
         self._prev_state = None
         self._curr_state = None
-        self._prev_timestamp = time.perf_counter()
-        self._curr_timestamp = time.perf_counter()
+        self._prev_timestamp = now
+        self._curr_timestamp = now
         self._sim_tick_delta = 1.0 / 60.0
+        # Atomický neměnný rámec (prev, curr, t_curr, dt_sim) pro 100% lock-free čtení z GUI
+        self._state_frame: tuple | None = None
+        self._latest_snapshot: dict | None = None
+        self._snapshot_seq: int = 0
         self._latest_snapshot_cache = None
         self._selected_unit_id: int | None = None
         self._auto_select_best: bool = True
@@ -128,35 +133,51 @@ class LockFreeStateBridge:
         return True
 
     def publish_simulation_state(self, raw_state: dict, fixed_dt: float = 1.0 / 60.0):
-        """Volá worker simulační vlákno po každém dokončeném kroku fyziky."""
+        """Volá worker simulační vlákno po každém dokončeném kroku fyziky (atomický swap reference)."""
         now = time.perf_counter()
-        with self._lock:
-            if self._states_compatible(self._curr_state, raw_state):
-                self._prev_state = self._curr_state
-                self._prev_timestamp = self._curr_timestamp
-            else:
-                self._prev_state = raw_state
-                self._prev_timestamp = now
-            self._curr_state = raw_state
-            self._curr_timestamp = now
-            self._sim_tick_delta = fixed_dt
+        self._snapshot_seq += 1
+        raw_state["_seq"] = self._snapshot_seq
+
+        curr_prev = self._curr_state
+        if self._states_compatible(curr_prev, raw_state):
+            new_prev = curr_prev
+            self._prev_timestamp = self._curr_timestamp
+        else:
+            new_prev = raw_state
+            self._prev_timestamp = now
+
+        self._prev_state = new_prev
+        self._curr_state = raw_state
+        self._curr_timestamp = now
+        self._sim_tick_delta = fixed_dt
+
+        # Jediná atomická publikace neměnného páru i nejnovějšího snímku (lock-free pro GUI čtenáře)
+        self._state_frame = (new_prev, raw_state, now, fixed_dt)
+        self._latest_snapshot = raw_state
+
+    def publish_snapshot(self, snapshot: dict, fixed_dt: float = 1.0 / 60.0) -> None:
+        """Alias pro atomickou publikaci kompletního snapshotu (lock-free double buffer)."""
+        self.publish_simulation_state(snapshot, fixed_dt=fixed_dt)
+
+    def get_latest_snapshot(self) -> dict | None:
+        """Vrátí poslední kompletní snapshot zcela bez zamykání (lock-free)."""
+        return self._latest_snapshot
 
     def get_interpolated_state(self) -> dict | None:
         """
-        Volá renderovací smyčka (180 FPS) kdykoliv bez blokování.
-        Vypočte alfa faktor a hladce interpoluje pozice a úhly jednotek.
+        Volá renderovací smyčka (60–180 FPS) zcela bez zámků (lock-free).
+        Čte atomický neměnný rámec (prev, curr, t_curr, dt_sim) a plynule interpoluje pozice a úhly.
         """
-        with self._lock:
-            curr = self._curr_state
-            prev = self._prev_state
-            t_curr = self._curr_timestamp
-            dt_sim = self._sim_tick_delta
+        frame = self._state_frame
+        if frame is None:
+            return None
 
+        prev, curr, t_curr, dt_sim = frame
         if curr is None:
             return None
 
         # Pokud ještě nemáme 2 po sobě jdoucí stavy, vrátíme aktuální
-        if prev is None or dt_sim <= 0.0:
+        if prev is None or prev is curr or dt_sim <= 0.0:
             return curr
 
         pos_prev = prev.get("pos")
@@ -164,10 +185,6 @@ class LockFreeStateBridge:
 
         # Ochrana před změnou počtu jednotek (N) nebo přechodem na novou operaci/epochu
         if not self._states_compatible(prev, curr):
-            with self._lock:
-                if self._curr_state is curr:
-                    self._prev_state = curr
-                    self._prev_timestamp = t_curr
             snapshot = dict(curr)
             snapshot["pos"] = pos_curr
             snapshot["heading"] = curr.get("heading")
