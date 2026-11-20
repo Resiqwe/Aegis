@@ -367,7 +367,14 @@ class TelemetryManager:
             if not os.path.exists(filepath):
                 return False
 
-            data = torch.load(filepath, map_location=engine.device, weights_only=False)
+            try:
+                data = torch.load(filepath, map_location=engine.device, weights_only=True)
+            except Exception as load_err:
+                print(
+                    f"[TelemetryManager] VAROVÁNÍ: weights_only=True selhalo pro {os.path.basename(filepath)} "
+                    f"({load_err}), zkouším legacy fallback weights_only=False."
+                )
+                data = torch.load(filepath, map_location=engine.device, weights_only=False)
 
             engine.n_factions = data.get("n_factions", 4)
             engine.budget_per_faction = data.get("budget_per_faction", 100)

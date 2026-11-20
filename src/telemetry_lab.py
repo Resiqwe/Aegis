@@ -133,7 +133,11 @@ class TelemetryLab:
         if snaps:
             self.latest_snapshot_path = snaps[0]
             try:
-                self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=False)
+                try:
+                    self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=True)
+                except Exception as load_err:
+                    print(f"[TelemetryLab] VAROVÁNÍ: weights_only=True selhalo ({load_err}), používám legacy fallback.")
+                    self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=False)
             except Exception:
                 self.snapshot_data = None
 

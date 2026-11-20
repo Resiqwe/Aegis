@@ -68,12 +68,20 @@ class AsyncSimulationWorker:
         """Ukončí simulační vlákno s garantovaným joinem."""
         self._stop_requested.set()
         self._running = False
+        thread_stopped = True
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=join_timeout)
-        self._thread = None
-        telemetry_mgr = getattr(self.engine, "telemetry_mgr", None)
-        if telemetry_mgr is not None and hasattr(telemetry_mgr, "shutdown"):
-            telemetry_mgr.shutdown(wait=True)
+            if self._thread.is_alive():
+                thread_stopped = False
+                print(
+                    f"[AsyncSimulationWorker] VAROVÁNÍ: Simulační vlákno neskončilo do {join_timeout:.1f}s; "
+                    "ponechávám telemetrii otevřenou, aby nedošlo k chybě při dobíhajícím ukládání."
+                )
+        if thread_stopped:
+            self._thread = None
+            telemetry_mgr = getattr(self.engine, "telemetry_mgr", None)
+            if telemetry_mgr is not None and hasattr(telemetry_mgr, "shutdown"):
+                telemetry_mgr.shutdown(wait=True)
 
     def post_command(self, cmd_name: str, *args, **kwargs):
         """Odešle příkaz do simulačního vlákna (bezpečné volání z libovolného vlákna)."""
