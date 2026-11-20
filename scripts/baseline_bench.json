@@ -1,0 +1,37 @@
+{
+  "n_units": 800,
+  "ticks": 500,
+  "seed": 42,
+  "device": "cuda:0",
+  "total_sec": 8.1895,
+  "ms_per_tick": 16.379,
+  "tps": 61.1,
+  "contract_errors": [],
+  "metrics": {
+    "tick_counter": 515,
+    "alive_count": 283,
+    "kills_per_faction": [
+      56,
+      73,
+      78,
+      70
+    ],
+    "node_owners": [
+      0,
+      2,
+      1,
+      0,
+      1
+    ],
+    "node_control_points": [
+      42.719966888427734,
+      26.399982452392578,
+      3.8399999141693115,
+      5.759999752044678
+    ],
+    "pos_sum": 1043091.8125,
+    "hp_sum": 31164.876953125,
+    "fitness_sum": 20363.7265625,
+    "fitness_std": 106.75357818603516
+  }
+}
