@@ -5,10 +5,11 @@ engine/async_runner.py - Samostatné asynchronní Worker Vlákno simulátoru.
 Komunikuje s renderovacím vláknem pomocí LockFreeStateBridge bez zpomalování FPS.
 """
 
+import os
 import time
 import threading
 import queue
-from typing import Callable, Any
+from typing import Any
 from engine.state_bridge import LockFreeStateBridge
 from src.profiler import worker_prof
 
@@ -70,6 +71,9 @@ class AsyncSimulationWorker:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=join_timeout)
         self._thread = None
+        telemetry_mgr = getattr(self.engine, "telemetry_mgr", None)
+        if telemetry_mgr is not None and hasattr(telemetry_mgr, "shutdown"):
+            telemetry_mgr.shutdown(wait=True)
 
     def post_command(self, cmd_name: str, *args, **kwargs):
         """Odešle příkaz do simulačního vlákna (bezpečné volání z libovolného vlákna)."""
@@ -80,22 +84,55 @@ class AsyncSimulationWorker:
         while not self.command_queue.empty():
             try:
                 cmd_name, args, kwargs = self.command_queue.get_nowait()
-                if callable(cmd_name):
-                    cmd_name(self.engine, *args, **kwargs)
-                elif cmd_name == "switch_scenario":
-                    self.engine.switch_scenario(*args, **kwargs)
-                elif cmd_name == "set_doctrine" or cmd_name == "set_faction_doctrine":
-                    self.engine.set_faction_doctrine(*args, **kwargs)
-                elif cmd_name == "start_new_operation":
-                    self.engine.start_new_operation(*args, **kwargs)
-                elif cmd_name == "configure":
-                    self.engine.configure(*args, **kwargs)
-                elif cmd_name in ("force_evolve", "finish_operation_and_evolve"):
-                    self.engine.finish_operation_and_evolve()
-                elif hasattr(self.engine, cmd_name):
-                    getattr(self.engine, cmd_name)(*args, **kwargs)
+                with self.engine._engine_lock:
+                    if callable(cmd_name):
+                        cmd_name(self.engine, *args, **kwargs)
+                    elif cmd_name == "switch_scenario":
+                        self.engine.switch_scenario(*args, **kwargs)
+                    elif cmd_name == "set_doctrine" or cmd_name == "set_faction_doctrine":
+                        self.engine.set_faction_doctrine(*args, **kwargs)
+                    elif cmd_name == "start_new_operation":
+                        self.engine.start_new_operation(*args, **kwargs)
+                    elif cmd_name == "configure":
+                        self.engine.configure(*args, **kwargs)
+                    elif cmd_name in ("force_evolve", "finish_operation_and_evolve"):
+                        self.engine.finish_operation_and_evolve()
+                    elif cmd_name == "save_snapshot":
+                        telemetry_mgr = getattr(self.engine, "telemetry_mgr", None)
+                        if telemetry_mgr is not None:
+                            started = telemetry_mgr.save_snapshot_async(
+                                self.engine,
+                                *args,
+                                on_complete=lambda path: self.bridge.post_banner(
+                                    f"[ULOZIT] Uložen model: {os.path.basename(path)}"
+                                ),
+                                **kwargs,
+                            )
+                            if not started:
+                                self.bridge.post_banner("[INFO] Ukládání snapshotu již probíhá...")
+                    elif hasattr(self.engine, cmd_name):
+                        getattr(self.engine, cmd_name)(*args, **kwargs)
             except Exception as e:
                 print(f"[AsyncSimulationWorker] Chyba při zpracování příkazu {cmd_name}: {e}")
+
+    def _build_snapshot(self) -> dict:
+        """Sestaví kompletní CPU snapshot včetně inspekce sledované jednotky pod jedním zámkem."""
+        target_id, auto_best = self.bridge.get_selected_unit_request()
+        with self.engine._engine_lock:
+            snapshot = self.engine.get_battle_state_snapshot()
+            if (
+                auto_best
+                or target_id is None
+                or not (0 <= target_id < self.engine.N)
+                or float(self.engine.hp[target_id].item()) <= 0.0
+            ):
+                resolved_id = self.engine.get_best_alive_unit()
+            else:
+                resolved_id = target_id
+            inspected = self.engine.inspect_unit(resolved_id)
+            snapshot["inspected_unit"] = inspected
+            snapshot["selected_unit_id"] = inspected["unit_idx"] if inspected is not None else None
+            return snapshot
 
     def _worker_loop(self):
         """
@@ -108,7 +145,7 @@ class AsyncSimulationWorker:
         snap_interval = 1.0 / 30.0  # Maximálně 30 snapshotů za sekundu (odlehčení PCIe a GILu)
 
         # Počáteční publikace stavu
-        initial_state = self.engine.get_battle_state_snapshot()
+        initial_state = self._build_snapshot()
         self.bridge.publish_simulation_state(initial_state, sim_dt)
 
         while not self._stop_requested.is_set():
@@ -144,7 +181,7 @@ class AsyncSimulationWorker:
                 now_curr = time.perf_counter()
                 if (now_curr - last_snap_time) >= snap_interval and steps_done > 0:
                     t_snap0 = time.perf_counter()
-                    raw_snapshot = self.engine.get_battle_state_snapshot()
+                    raw_snapshot = self._build_snapshot()
                     t_snap1 = time.perf_counter()
                     snap_dur = (t_snap1 - t_snap0) * 1000.0
                     worker_prof.record("snapshot_ms", snap_dur)

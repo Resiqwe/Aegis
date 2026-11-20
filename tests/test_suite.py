@@ -15,7 +15,6 @@ import sys
 import time
 import unittest
 import torch
-import numpy as np
 
 # Přidání cesty k src
 test_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,7 +46,9 @@ class TestCyberTacticsSuite(unittest.TestCase):
         print(f"\n[Test Setup] Testování na zařízení: {cls.device}")
 
     def test_01_config_and_dimensions(self):
-        """Ověření správných rozměrů světa a senzorů/akcí."""
+        """Ověření importu klíčových modulů, rozměrů světa a senzorů/akcí."""
+        for mod in (config, ai_brains, scenarios, engine_core, telemetry_logger, telemetry_lab):
+            self.assertIsNotNone(mod)
         self.assertEqual(config.WORLD_W, 2400)
         self.assertEqual(config.WORLD_H, 1350)
         self.assertEqual(len(config.SENSOR_NAMES), 14)
@@ -75,7 +76,8 @@ class TestCyberTacticsSuite(unittest.TestCase):
         for _ in range(120):
             engine.step(1.0 / 60.0)
 
-        snapshot = engine.get_battle_state_snapshot()
+        with engine._engine_lock:
+            snapshot = engine.get_battle_state_snapshot()
         self.assertIn("pos", snapshot)
         self.assertIn("hp", snapshot)
         self.assertIn("alive", snapshot)
@@ -174,6 +176,62 @@ class TestCyberTacticsSuite(unittest.TestCase):
             os.remove(snap_path)
         except Exception:
             pass
+        telemetry.shutdown(wait=True)
+
+    def test_07_async_snapshot_pipeline(self):
+        """Ověření Fáze 1: asynchronní ukládání snapshotu přes worker, debounce, atomický zápis a načtení."""
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(400, 4)
+        telemetry = telemetry_logger.TelemetryManager("telemetry")
+        engine.telemetry_mgr = telemetry
+
+        bridge = LockFreeStateBridge()
+        worker = AsyncSimulationWorker(engine, bridge)
+        worker.start()
+
+        # Pošleme 2 požadavky rychle za sebou a ověříme doručení banneru i vytvoření souboru
+        worker.post_command("save_snapshot", "async_test")
+        banners = []
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            banners.extend(bridge.pop_banners())
+            if any("[ULOZIT]" in b for b in banners):
+                break
+            time.sleep(0.05)
+
+        worker.stop()
+
+        save_banners = [b for b in banners if "[ULOZIT]" in b]
+        self.assertEqual(len(save_banners), 1, f"Očekáván 1 potvrzovací banner, získáno: {banners}")
+
+        snaps = [p for p in telemetry.list_available_snapshots() if "async_test" in os.path.basename(p)]
+        self.assertTrue(len(snaps) >= 1, "Asynchronní snapshot nebyl nalezen na disku.")
+        snap_path = snaps[0]
+        self.assertFalse(os.path.exists(snap_path + ".tmp"), "Dočasný .tmp soubor nesmí zůstat na disku.")
+
+        # Ověření, že neobsahuje duplicitní klíče brains_W1 a jde načíst zpět
+        raw = torch.load(snap_path, map_location="cpu", weights_only=False)
+        self.assertIn("brains_W1_full", raw)
+        self.assertNotIn("brains_W1", raw)
+
+        engine2 = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine2.configure(400, 4)
+        self.assertTrue(telemetry.load_snapshot(engine2, snap_path))
+
+        # Ověření debounce pojistky (_save_in_progress)
+        with telemetry._io_lock:
+            telemetry._save_in_progress = True
+        try:
+            self.assertFalse(telemetry.save_snapshot_async(engine, "debounce_blocked"))
+        finally:
+            with telemetry._io_lock:
+                telemetry._save_in_progress = False
+
+        try:
+            os.remove(snap_path)
+        except Exception:
+            pass
+        telemetry.shutdown(wait=True)
 
 
 if __name__ == "__main__":

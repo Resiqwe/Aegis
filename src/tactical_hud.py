@@ -38,8 +38,8 @@ import torch
 import pygame
 
 from src.scenarios import SCENARIO_NAMES
-from src.engine_core import RealisticBattleEngine, FACTION_COLORS, DOCTRINE_LIST
-from src.ai_brains import CLASS_GRUNT, CLASS_MEDIC, CLASS_SNIPER, CLASS_JUGGERNAUT, TECH_NAMES, TECH_COSTS
+from src.engine_core import RealisticBattleEngine, DOCTRINE_LIST
+from src.ai_brains import CLASS_MEDIC
 from src.telemetry_logger import TelemetryManager
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
@@ -180,13 +180,18 @@ class OptimizedTacticalHUD:
         self.pan_start_mouse = (0, 0)
         self.pan_start_cam = (self.cam_x, self.cam_y)
 
-        self.selected_unit = -1  # -1 = auto-track nejlepšího vojáka generace
+        self._set_selected_unit(-1)  # -1 = auto-track nejlepšího vojáka generace
         self.follow_selected = False
         self.ui_buttons = {}
         self._btn_flash = {}  # {key: timestamp} pro okamžitou vizuální odezvu stisku
         self.viewport_rect = pygame.Rect(0, 0, 100, 100)
         self.status_banner = ""
         self.status_banner_timer = 0.0
+
+    def _set_selected_unit(self, unit_idx: int):
+        self.selected_unit = int(unit_idx)
+        if hasattr(self, "bridge") and self.bridge is not None:
+            self.bridge.set_selected_unit(self.selected_unit, auto_select_best=(self.selected_unit < 0))
 
     def _rebuild_fonts(self):
         """DPI/resolution scaling: na QHD/UWQHD zvětší písmo o ~35-50 %."""
@@ -210,7 +215,7 @@ class OptimizedTacticalHUD:
             self.worker.post_command("configure", b_pts * self.n_factions, self.n_factions)
         else:
             self.engine.configure(b_pts * self.n_factions, self.n_factions)
-        self.selected_unit = -1
+        self._set_selected_unit(-1)
 
     def reset_camera(self):
         self.zoom = 1.0
@@ -275,8 +280,12 @@ class OptimizedTacticalHUD:
                     self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
                     self.show_banner(f"Rychlost tréninku: {self.speed_presets[self.speed_idx]:g}x")
                 elif ev.key == pygame.K_F5 or (ev.key == pygame.K_s and (pygame.key.get_mods() & pygame.KMOD_CTRL)):
-                    path = self.telemetry.save_snapshot(self.engine)
-                    self.show_banner(f"Uložen snapshot [F5/Ctrl+S]: {os.path.basename(path)}")
+                    if hasattr(self, "worker") and self.worker is not None:
+                        self.worker.post_command("save_snapshot")
+                        self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
+                    else:
+                        path = self.telemetry.save_snapshot(self.engine)
+                        self.show_banner(f"Uložen snapshot [F5/Ctrl+S]: {os.path.basename(path)}")
                 elif ev.key == pygame.K_l:
                     snaps = self.telemetry.list_available_snapshots()
                     if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
@@ -301,20 +310,26 @@ class OptimizedTacticalHUD:
                     self.cam_y = 0.70 * self.cam_y + 0.30 * old_wy
 
             elif ev.type == pygame.MOUSEBUTTONDOWN:
-                mx, my = ev.pos
+                mx, my = pygame.mouse.get_pos()
                 if ev.button == 1:
                     if not self._check_ui_click(mx, my) and self.viewport_rect.collidepoint(mx, my):
                         wx, wy = self.screen_to_world(mx, my)
+                        pos_np = None
                         if hasattr(self, "last_state") and self.last_state and "pos" in self.last_state:
                             pos_np = self.last_state["pos"]
+                        elif hasattr(self, "bridge") and self.bridge is not None:
+                            snap = self.bridge.get_interpolated_state()
+                            if snap and "pos" in snap:
+                                pos_np = snap["pos"]
+                        if pos_np is not None and len(pos_np) > 0:
+                            dists = np.hypot(pos_np[:, 0] - wx, pos_np[:, 1] - wy)
+                            min_d = np.min(dists)
+                            if min_d <= 40.0:
+                                self._set_selected_unit(int(np.argmin(dists)))
+                            else:
+                                self._set_selected_unit(-1)
                         else:
-                            pos_np = self.engine.pos.cpu().numpy()
-                        dists = np.hypot(pos_np[:, 0] - wx, pos_np[:, 1] - wy)
-                        min_d = np.min(dists)
-                        if min_d <= 40.0:
-                            self.selected_unit = int(np.argmin(dists))
-                        else:
-                            self.selected_unit = -1
+                            self._set_selected_unit(-1)
 
                 elif ev.button in (2, 3) and self.viewport_rect.collidepoint(mx, my):
                     self.panning = True
@@ -326,7 +341,7 @@ class OptimizedTacticalHUD:
                 self.panning = False
 
             elif ev.type == pygame.MOUSEMOTION and self.panning and self.zoom > 1.01:
-                mx, my = ev.pos
+                mx, my = pygame.mouse.get_pos()
                 dx = mx - self.pan_start_mouse[0]
                 dy = my - self.pan_start_mouse[1]
                 scale_x = (self.SIM_W / self.zoom) / max(1, self.viewport_rect.width)
@@ -393,8 +408,12 @@ class OptimizedTacticalHUD:
             self.reboot_simulation()
             self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0)
         elif key == "save_snap":
-            path = self.telemetry.save_snapshot(self.engine)
-            self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
+            if hasattr(self, "worker") and self.worker is not None:
+                self.worker.post_command("save_snapshot")
+                self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
+            else:
+                path = self.telemetry.save_snapshot(self.engine)
+                self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
         elif key == "load_snap":
             snaps = self.telemetry.list_available_snapshots()
             if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
@@ -805,7 +824,7 @@ class OptimizedTacticalHUD:
         # ==========================================
         pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
         lbl_mode = "MANUÁL" if self.selected_unit >= 0 else "AUTO-ELITA"
-        self.screen.blit(self.text_cache.render(self.f_sub, f"3. HIERARCHICKÝ MOZEK (14->64->64->7) // {lbl_mode}", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
+        self.screen.blit(self.text_cache.render(self.f_sub, f"3. HIERARCHICKÝ MOZEK (14->24->16->7) // {lbl_mode}", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
         y += hdr_h + 3
 
         sens_step = max(13, int(14 * self.ui_scale))
@@ -913,16 +932,16 @@ class OptimizedTacticalHUD:
             else:
                 pygame.draw.rect(self.screen, c_b, (bx + half_b - w_b, ry + 1, w_b, 7), border_radius=2)
 
-        # Dvouvrstvá hierarchická reprezentace: H1 (Percepce 64n) + H2 (Taktika 64n) = 128 neuronů
+        # Dvouvrstvá hierarchická reprezentace: H1 (Percepce 24n) + H2 (Taktika 16n) = 40 neuronů
         hy = col_y_start + 15 + 7 * act_step_7 + 8
-        self.screen.blit(self.text_cache.render(self.f_tiny, "H1: PERCEPCE PROSTORU (64 NEURONŮ // 4x16)", ACCENT_CYAN), (rx + 4, hy))
-        h1_vals = df.get("hidden_h1", df.get("hidden", [])[:64])
-        n_cols = 16
+        self.screen.blit(self.text_cache.render(self.f_tiny, "H1: PERCEPCE PROSTORU (24 NEURONŮ // 2x12)", ACCENT_CYAN), (rx + 4, hy))
+        h1_vals = df.get("hidden_h1", df.get("hidden", [])[:24])
+        n_cols = 12
         cell_gap = 2
         cell_w = max(6, (col_w - (n_cols - 1) * cell_gap - 8) // n_cols)
         cell_h = max(6, int(6.5 * self.ui_scale))
 
-        for idx, h_val in enumerate(h1_vals[:64]):
+        for idx, h_val in enumerate(h1_vals[:24]):
             r_idx = idx // n_cols
             c_idx = idx % n_cols
             cx = rx + 4 + c_idx * (cell_w + cell_gap)
@@ -934,19 +953,22 @@ class OptimizedTacticalHUD:
             pygame.draw.rect(self.screen, BORDER_COL, (cx, cy, cell_w, cell_h), width=1, border_radius=1)
 
         # Vrstva H2: Taktická syntéza
-        h2_y = hy + 14 + 4 * (cell_h + cell_gap) + 6
-        self.screen.blit(self.text_cache.render(self.f_tiny, "H2: TAKTICKÁ SYNTÉZA (64 NEURONŮ // 4x16)", ACCENT_AMBER), (rx + 4, h2_y))
-        h2_vals = df.get("hidden_h2", df.get("hidden", [])[64:128])
-        for idx, h_val in enumerate(h2_vals[:64]):
-            r_idx = idx // n_cols
-            c_idx = idx % n_cols
-            cx = rx + 4 + c_idx * (cell_w + cell_gap)
+        h1_rows = (min(len(h1_vals), 24) + n_cols - 1) // n_cols if h1_vals else 2
+        h2_y = hy + 14 + max(2, h1_rows) * (cell_h + cell_gap) + 6
+        self.screen.blit(self.text_cache.render(self.f_tiny, "H2: TAKTICKÁ SYNTÉZA (16 NEURONŮ // 2x8)", ACCENT_AMBER), (rx + 4, h2_y))
+        h2_vals = df.get("hidden_h2", df.get("hidden", [])[24:40])
+        n_cols_h2 = 8
+        cell_w_h2 = max(6, (col_w - (n_cols_h2 - 1) * cell_gap - 8) // n_cols_h2)
+        for idx, h_val in enumerate(h2_vals[:16]):
+            r_idx = idx // n_cols_h2
+            c_idx = idx % n_cols_h2
+            cx = rx + 4 + c_idx * (cell_w_h2 + cell_gap)
             cy = h2_y + 14 + r_idx * (cell_h + cell_gap)
             val_clamped = 0.0 if (math.isnan(h_val) or math.isinf(h_val)) else max(0.0, min(1.0, abs(h_val)))
             inten = int(val_clamped * 200)
             col_h = (min(255, 30 + inten), min(255, 140 + inten // 2), 255) if h_val >= 0 else (min(255, 180 + inten // 3), 40, 70)
-            pygame.draw.rect(self.screen, col_h, (cx, cy, cell_w, cell_h), border_radius=1)
-            pygame.draw.rect(self.screen, BORDER_COL, (cx, cy, cell_w, cell_h), width=1, border_radius=1)
+            pygame.draw.rect(self.screen, col_h, (cx, cy, cell_w_h2, cell_h), border_radius=1)
+            pygame.draw.rect(self.screen, BORDER_COL, (cx, cy, cell_w_h2, cell_h), width=1, border_radius=1)
 
         y += insp_h + 8
 
@@ -1007,6 +1029,9 @@ class OptimizedTacticalHUD:
             if self.status_banner_timer > 0.0:
                 self.status_banner_timer = max(0.0, self.status_banner_timer - (1.0 / 60.0))
 
+            for msg in self.bridge.pop_banners():
+                self.show_banner(msg, 3.0)
+
             # 180 FPS Lock-Free State Bridge & Async Simulation Worker
             if self.worker.is_running() != self.running:
                 self.worker.set_paused(not self.running)
@@ -1015,22 +1040,26 @@ class OptimizedTacticalHUD:
             t_bridge0 = time.perf_counter()
             state = self.bridge.get_interpolated_state()
             if state is None:
-                state = self.engine.get_battle_state_snapshot()
+                state = getattr(self, "last_state", None)
             t_bridge1 = time.perf_counter()
             render_prof.record("bridge_lerp_ms", (t_bridge1 - t_bridge0) * 1000.0)
+            if state is None:
+                self.clock.tick(getattr(self, "target_fps", 60))
+                continue
             self.last_state = state
             
             t_insp0 = time.perf_counter()
-            unit_info = None
-            try:
-                unit_info = self.engine.inspect_unit(self.selected_unit)
-            except Exception:
-                unit_info = None
+            unit_info = state.get("inspected_unit")
             t_insp1 = time.perf_counter()
             render_prof.record("inspect_unit_ms", (t_insp1 - t_insp0) * 1000.0)
 
             if unit_info is not None and self.follow_selected and unit_info["hp"] > 0:
-                ux, uy = unit_info["pos"]
+                pos_arr = state.get("pos")
+                uid = unit_info.get("unit_idx", -1)
+                if pos_arr is not None and 0 <= uid < len(pos_arr):
+                    ux, uy = pos_arr[uid]
+                else:
+                    ux, uy = unit_info["pos"]
                 self.cam_x = 0.85 * self.cam_x + 0.15 * ux
                 self.cam_y = 0.85 * self.cam_y + 0.15 * uy
 
@@ -1058,6 +1087,8 @@ class OptimizedTacticalHUD:
 
         if getattr(self, "_owns_worker", True):
             self.worker.stop()
+        if hasattr(self.telemetry, "shutdown"):
+            self.telemetry.shutdown(wait=True)
         self.telemetry.flush_spatial_parquet()
         if not self.embedded:
             pygame.quit()
