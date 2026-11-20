@@ -271,6 +271,35 @@ class TestCyberTacticsSuite(unittest.TestCase):
         interp2 = bridge.get_interpolated_state()
         self.assertTrue(interp2.get("is_interpolated", False))
 
+    def test_09_phase2_vectorized_nodes_and_kills(self):
+        """Ověření Fáze 2: 0x .item() ve for smyčkách hot-loopu a korektní GPU vektorizace uzlů a killů."""
+        import ast
+        from pathlib import Path
+
+        core_path = Path(src_dir) / "engine_core.py"
+        tree = ast.parse(core_path.read_text(encoding="utf-8"))
+        hot_methods = {"_step_internal", "_atomic_commit_pipeline"}
+        bad_items = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in hot_methods:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.For):
+                        for inner in ast.walk(sub):
+                            if isinstance(inner, ast.Attribute) and inner.attr == "item":
+                                bad_items.append((node.name, inner.lineno))
+        self.assertEqual(bad_items, [], f"Nalezeno .item() uvnitř for smyčky: {bad_items}")
+
+        # Funkční ověření vektorizovaného obsazování uzlů i GPU akumulace killů
+        engine = engine_core.RealisticBattleEngine(2400, 1350, self.device)
+        engine.configure(200, 4)
+        engine.visual_mode = False
+        for _ in range(30):
+            engine.step(1.0 / 60.0)
+        self.assertEqual(
+            int(engine.kills_per_faction.sum().item()),
+            int(engine.unit_kills.sum().item()),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
