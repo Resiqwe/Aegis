@@ -21,9 +21,7 @@ Klíčové mechaniky:
    - Sniper s těžkou zbraní (AP=65) po proražení cíle pokračuje v letu.
 """
 
-import math
 import torch
-import numpy as np
 
 # Konstanty zón těla
 ZONE_HEAD = 0
@@ -68,6 +66,8 @@ class VectorizedBallisticsSystem:
         target_in_cover: torch.Tensor,
         has_kinetic_shield: torch.Tensor,
         base_dmg: torch.Tensor,
+        sniper_focus_active: torch.Tensor | None = None,
+        fortress_shield_active: torch.Tensor | None = None,
     ) -> dict:
         """
         Vektorově vyhodnotí balistiku pro celou dávku střel najednou:
@@ -126,6 +126,9 @@ class VectorizedBallisticsSystem:
 
         # 4. Průbojnost (AP) vs Efektivní pancíř (AR)
         bullet_ap = self.ap_tensor[s_cls]
+        if sniper_focus_active is not None:
+            # Sniper Focus buff: +35% průbojnost AP
+            bullet_ap = torch.where(sniper_focus_active, bullet_ap * 1.35, bullet_ap)
         delta_ap = bullet_ap - target_armor
 
         # Pokud AP překročí pancíř: plná penetrace + 2% bonus za každý přebytečný bod AP
@@ -136,6 +139,9 @@ class VectorizedBallisticsSystem:
 
         # 5. Základní poškození modifikované zónou a průrazem
         raw_damage = (base_dmg * zone_multipliers * penetration_factor) * is_hit.float()
+        if fortress_shield_active is not None:
+            # Fortress Shield buff: 45% redukce poškození (cíle utrží jen 55% dmg)
+            raw_damage = torch.where(fortress_shield_active, raw_damage * 0.55, raw_damage)
 
         # 6. Absorpce kinetickým štítem (Power-Up TECH_SHIELDS)
         shield_active = has_kinetic_shield[valid_t] & is_hit
@@ -169,7 +175,12 @@ class VectorizedBallisticsSystem:
 
         # Yield potlačení palbou (Suppression yield) generovaný balistickým zásahem
         # Juggernaut má vysokou odolnost vůči potlačení (0.16 vs 0.35)
-        suppression_yield = torch.where(t_cls == 3, 0.16, 0.35) * is_hit.float()
+        # Fortress Shield dává plnou imunitu vůči potlačení (yield = 0.0)
+        base_supp_yield = torch.where(t_cls == 3, 0.16, 0.35) * is_hit.float()
+        if fortress_shield_active is not None:
+            suppression_yield = torch.where(fortress_shield_active, torch.zeros_like(base_supp_yield), base_supp_yield)
+        else:
+            suppression_yield = base_supp_yield
 
         return {
             "final_damage": final_damage,

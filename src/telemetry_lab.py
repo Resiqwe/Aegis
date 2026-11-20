@@ -22,7 +22,7 @@ import sys
 import glob
 import json
 import argparse
-import math
+import threading
 from datetime import datetime
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -66,6 +66,7 @@ except Exception:
 
 class TelemetryLab:
     def __init__(self, session_filter: str = "", telemetry_dir: str = "telemetry"):
+        self._lock = threading.RLock()
         self.telemetry_dir = telemetry_dir
         self.session_filter = session_filter
         self.session_file = None
@@ -160,33 +161,34 @@ class TelemetryLab:
         W2 = W2.float()
         N = W1.shape[0]
 
-        with torch.no_grad():
-            if W3 is not None:
-                W3 = W3.float()
-                # 3-vrstvý MLP: (N, 14, 64) @ (N, 64, 64) @ (N, 64, 7) -> (N, 14, 7)
-                eff_matrix = torch.bmm(torch.bmm(torch.abs(W1), torch.abs(W2)), torch.abs(W3))
-                var_W3 = float(torch.var(W3).item())
-            else:
-                eff_matrix = torch.bmm(torch.abs(W1), torch.abs(W2))
-                var_W3 = 0.0
+        with self._lock:
+            with torch.no_grad():
+                if W3 is not None:
+                    W3 = W3.float()
+                    # 3-vrstvý MLP: (N, 14, 64) @ (N, 64, 64) @ (N, 64, 7) -> (N, 14, 7)
+                    eff_matrix = torch.bmm(torch.bmm(torch.abs(W1), torch.abs(W2)), torch.abs(W3))
+                    var_W3 = float(torch.var(W3).item())
+                else:
+                    eff_matrix = torch.bmm(torch.abs(W1), torch.abs(W2))
+                    var_W3 = 0.0
 
-            avg_importance = torch.mean(eff_matrix, dim=0).numpy()
+                avg_importance = torch.mean(eff_matrix, dim=0).numpy()
 
-            # Celková důležitost senzorů přes všechny akce
-            sensor_totals = np.sum(avg_importance, axis=1)
-            sensor_rel_pct = (sensor_totals / (np.sum(sensor_totals) + 1e-6)) * 100.0
+                # Celková důležitost senzorů přes všechny akce
+                sensor_totals = np.sum(avg_importance, axis=1)
+                sensor_rel_pct = (sensor_totals / (np.sum(sensor_totals) + 1e-6)) * 100.0
 
-            # Genetická diverzita (rozptyl vah napříč populací)
-            var_W1 = float(torch.var(W1).item())
-            var_W2 = float(torch.var(W2).item())
-            diversity_index = (var_W1 + var_W2 + var_W3) / (3.0 if W3 is not None else 2.0)
+                # Genetická diverzita (rozptyl vah napříč populací)
+                var_W1 = float(torch.var(W1).item())
+                var_W2 = float(torch.var(W2).item())
+                diversity_index = (var_W1 + var_W2 + var_W3) / (3.0 if W3 is not None else 2.0)
 
-        return {
-            "importance_matrix": avg_importance,
-            "sensor_pct": sensor_rel_pct,
-            "diversity_index": diversity_index,
-            "units_analyzed": N,
-        }
+            return {
+                "importance_matrix": avg_importance,
+                "sensor_pct": sensor_rel_pct,
+                "diversity_index": diversity_index,
+                "units_analyzed": N,
+            }
 
     def print_terminal_summary(self):
         """Vytiskne strukturovaný vědecký report v terminálu."""

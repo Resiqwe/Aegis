@@ -1,12 +1,11 @@
-import math
+import threading
 import numpy as np
 from collections import deque
 import torch
 
 from src.config import (
     CLASS_GRUNT, CLASS_MEDIC, CLASS_SNIPER, CLASS_JUGGERNAUT,
-    CLASS_COSTS, CLASS_NAMES, UNLOCK_XP, COMMAND_RANKS,
-    TECH_NANITES, TECH_RADAR, TECH_SHIELDS, TECH_OVERCLOCK, TECH_AEROSOL,
+    CLASS_COSTS, UNLOCK_XP, COMMAND_RANKS,
     TECH_NAMES, TECH_COSTS,
     SENSOR_NAMES, ACTION_NAMES, SENSOR_COUNT, ACTION_COUNT
 )
@@ -23,7 +22,7 @@ def tactical_brain_forward(
 ) -> torch.Tensor:
     """
     2-vrstvý hierarchický MLP:
-    x (B, 14) -> H1: Percepce (B, 64) -> H2: Taktická syntéza (B, 64) -> 7 Akcí (B, 7)
+    x (B, 14) -> H1: Percepce (B, 24) -> H2: Taktická syntéza (B, 16) -> 7 Akcí (B, 7)
     Výstupy:
     0: Surge (tanh [-1..1]) - Plyn vpřed / couvání
     1: Sway (tanh [-1..1]) - Úkrok vpravo / vlevo
@@ -56,6 +55,7 @@ class FactionGeneralBrain:
     def __init__(self, faction_id: int, device: torch.device):
         self.faction_id = faction_id
         self.device = device
+        self._lock = threading.RLock()
         self.xp = 0.0
         self.level = 0
         self.total_campaign_wins = 0
@@ -64,7 +64,7 @@ class FactionGeneralBrain:
         self.composition_weights = torch.tensor([1.0, 0.7, 0.6, 0.5], dtype=torch.float32, device=device)
         self.class_roi_ema = [0.0, 0.0, 0.0, 0.0]
 
-        # Technologie: Nanity, Radar, Štíty, Overclock, Aerosol
+        # Technologie: Sanity, Radar, Štíty, Overclock, Aerosol
         self.tech_weights = torch.tensor([0.6, 0.5, 0.7, 0.6, 0.5], dtype=torch.float32, device=device)
         self.tech_roi_ema = [0.0, 0.0, 0.0, 0.0, 0.0]
         self.active_techs: list[int] = []
@@ -89,27 +89,28 @@ class FactionGeneralBrain:
         return list(range(len(TECH_NAMES)))
 
     def allocate_full_budget(self, total_budget: int = 250) -> tuple[list[int], list[int]]:
-        unlocked_techs = self.get_unlocked_techs()
-        bought_techs = []
-        rem_budget = total_budget
+        with self._lock:
+            unlocked_techs = self.get_unlocked_techs()
+            bought_techs = []
+            rem_budget = total_budget
 
-        max_tech_budget = int(total_budget * 0.30)
-        tech_spent = 0
+            max_tech_budget = int(total_budget * 0.30)
+            tech_spent = 0
 
-        if unlocked_techs and max_tech_budget >= 15:
-            t_probs = torch.sigmoid(self.tech_weights[unlocked_techs]).cpu().numpy()
-            sorted_indices = sorted(range(len(unlocked_techs)), key=lambda k: t_probs[k], reverse=True)
-            for idx in sorted_indices:
-                t_id = unlocked_techs[idx]
-                cost = TECH_COSTS[t_id]
-                if t_probs[idx] > 0.45 and (tech_spent + cost) <= max_tech_budget and rem_budget >= cost:
-                    bought_techs.append(t_id)
-                    tech_spent += cost
-                    rem_budget -= cost
+            if unlocked_techs and max_tech_budget >= 15:
+                t_probs = torch.sigmoid(self.tech_weights[unlocked_techs]).cpu().numpy()
+                sorted_indices = sorted(range(len(unlocked_techs)), key=lambda k: t_probs[k], reverse=True)
+                for idx in sorted_indices:
+                    t_id = unlocked_techs[idx]
+                    cost = TECH_COSTS[t_id]
+                    if t_probs[idx] > 0.45 and (tech_spent + cost) <= max_tech_budget and rem_budget >= cost:
+                        bought_techs.append(t_id)
+                        tech_spent += cost
+                        rem_budget -= cost
 
-        self.active_techs = bought_techs
-        army = self.allocate_army_budget(total_budget=rem_budget)
-        return army, bought_techs
+            self.active_techs = bought_techs
+            army = self.allocate_army_budget(total_budget=rem_budget)
+            return army, bought_techs
 
     def allocate_army_budget(self, total_budget: int = 100) -> list[int]:
         unlocked = self.get_unlocked_classes()
@@ -134,13 +135,14 @@ class FactionGeneralBrain:
         return army
 
     def get_class_probabilities(self) -> np.ndarray:
-        unlocked = self.get_unlocked_classes()
-        masked_w = self.composition_weights.clone()
-        for c in range(4):
-            if c not in unlocked:
-                masked_w[c] = -1e9
-        probs = torch.softmax(masked_w, dim=0).cpu().numpy()
-        return probs
+        with self._lock:
+            unlocked = self.get_unlocked_classes()
+            masked_w = self.composition_weights.clone()
+            for c in range(4):
+                if c not in unlocked:
+                    masked_w[c] = -1e9
+            probs = torch.softmax(masked_w, dim=0).cpu().numpy()
+            return probs
 
     def learn_from_roi(self, class_roi_stats: dict[int, float], won_battle: bool):
         alpha = 0.20
@@ -163,17 +165,19 @@ class FactionGeneralBrain:
 
 class NeuroEvolutionPool:
     """
-    Třídně izolovaný hierarchický genofond (14 -> 64 -> 64 -> 7).
+    Třídně izolovaný hierarchický genofond (14 -> 24 -> 16 -> 7).
     4 frakce x 4 třídy x 50 slotů = 800 slotů v GPU paměti.
     """
     def __init__(self, device: torch.device):
         self.device = device
         self.dtype = torch.float32
+        self._lock = threading.RLock()
 
         self.N_IN = SENSOR_COUNT    # 14
-        self.N_H1 = 64
-        self.N_H2 = 64
+        self.N_H1 = 24
+        self.N_H2 = 16
         self.N_OUT = ACTION_COUNT   # 7
+        self.architecture_str = f"{self.N_IN} -> {self.N_H1} -> {self.N_H2} -> {self.N_OUT}"
         self.N_FACTIONS = 4
         self.N_CLASSES = 4
         self.SLOTS_PER_CLASS = 50
@@ -205,7 +209,7 @@ class NeuroEvolutionPool:
         self.W3.normal_(0.0, 0.22)
         self.b3.zero_()
 
-        # H1 percepce (vrozené synaptické dráhy):
+        # H1 percepce (vrozené synaptické dráhy - dimenze H1 = 24):
         self.W1[:, 0, 0] = 0.95   # Cíl fwd -> H1[0]
         self.W1[:, 1, 1] = 0.95   # Cíl side -> H1[1]
         self.W1[:, 2, 2] = 1.20   # Cíl blízko -> H1[2]
@@ -219,11 +223,11 @@ class NeuroEvolutionPool:
         self.W1[:, 9, 9] = -0.90  # Nízké HP -> H1[9] (Danger/Survival reflex)
         self.W1[:, 12, 10] = 0.80 # Koheze & Ping čety -> H1[10]
 
-        # H2 integrace:
+        # H2 integrace (dimenze H1=24 -> H2=16):
         for i in range(min(self.N_H1, self.N_H2)):
             self.W2[:, i, i] = 1.05
 
-        # H2 -> 7 Akcí:
+        # H2 -> 7 Akcí (dimenze H2 = 16, indexy 0..15):
         self.W3[:, 0, 0] = 0.85   # H2[0] -> Surge vpřed
         self.W3[:, 1, 1] = 0.75   # H2[1] -> Sway strafe
         self.W3[:, 1, 2] = 0.95   # H2[1] -> Yaw natočení na cíl
@@ -266,40 +270,41 @@ class NeuroEvolutionPool:
         )
 
     def inspect_decision_flow(self, brain_slot: int, sensor_vec: torch.Tensor) -> dict:
-        with torch.no_grad():
-            x_3d = sensor_vec.view(1, 1, self.N_IN)
-            w1 = self.W1[brain_slot:brain_slot+1]
-            b1 = self.b1[brain_slot:brain_slot+1]
-            w2 = self.W2[brain_slot:brain_slot+1]
-            b2 = self.b2[brain_slot:brain_slot+1]
-            w3 = self.W3[brain_slot:brain_slot+1]
-            b3 = self.b3[brain_slot:brain_slot+1]
+        with self._lock:
+            with torch.no_grad():
+                x_3d = sensor_vec.view(1, 1, self.N_IN)
+                w1 = self.W1[brain_slot:brain_slot+1]
+                b1 = self.b1[brain_slot:brain_slot+1]
+                w2 = self.W2[brain_slot:brain_slot+1]
+                b2 = self.b2[brain_slot:brain_slot+1]
+                w3 = self.W3[brain_slot:brain_slot+1]
+                b3 = self.b3[brain_slot:brain_slot+1]
 
-            h1 = torch.tanh(torch.bmm(x_3d, w1) + b1)
-            h2 = torch.tanh(torch.bmm(h1, w2) + b2)
-            raw_out = torch.bmm(h2, w3) + b3
+                h1 = torch.tanh(torch.bmm(x_3d, w1) + b1)
+                h2 = torch.tanh(torch.bmm(h1, w2) + b2)
+                raw_out = torch.bmm(h2, w3) + b3
 
-            surge_sway_yaw = torch.tanh(raw_out[:, :, 0:3])
-            trigger = torch.sigmoid(raw_out[:, :, 3:4])
-            stance = torch.tanh(raw_out[:, :, 4:5])
-            ability = torch.sigmoid(raw_out[:, :, 5:6])
-            ping = torch.tanh(raw_out[:, :, 6:7])
-            out = torch.cat([surge_sway_yaw, trigger, stance, ability, ping], dim=2).squeeze().cpu().numpy()
+                surge_sway_yaw = torch.tanh(raw_out[:, :, 0:3])
+                trigger = torch.sigmoid(raw_out[:, :, 3:4])
+                stance = torch.tanh(raw_out[:, :, 4:5])
+                ability = torch.sigmoid(raw_out[:, :, 5:6])
+                ping = torch.tanh(raw_out[:, :, 6:7])
+                out = torch.cat([surge_sway_yaw, trigger, stance, ability, ping], dim=2).squeeze().cpu().numpy()
 
-            h1_np = h1.squeeze().cpu().numpy()
-            h2_np = h2.squeeze().cpu().numpy()
-            s_np = sensor_vec.cpu().numpy()
+                h1_np = h1.squeeze().cpu().numpy()
+                h2_np = h2.squeeze().cpu().numpy()
+                s_np = sensor_vec.cpu().numpy()
 
-            sensors_summary = [(SENSOR_NAMES[i], float(s_np[i])) for i in range(self.N_IN)]
-            actions_summary = [(ACTION_NAMES[i], float(out[i])) for i in range(self.N_OUT)]
+                sensors_summary = [(SENSOR_NAMES[i], float(s_np[i])) for i in range(self.N_IN)]
+                actions_summary = [(ACTION_NAMES[i], float(out[i])) for i in range(self.N_OUT)]
 
-            return {
-                "sensors": sensors_summary,
-                "actions": actions_summary,
-                "hidden_h1": [float(v) for v in h1_np],
-                "hidden_h2": [float(v) for v in h2_np],
-                "hidden": [float(v) for v in np.concatenate([h1_np, h2_np])],
-            }
+                return {
+                    "sensors": sensors_summary,
+                    "actions": actions_summary,
+                    "hidden_h1": [float(v) for v in h1_np],
+                    "hidden_h2": [float(v) for v in h2_np],
+                    "hidden": [float(v) for v in np.concatenate([h1_np, h2_np])],
+                }
 
     def evolve_epoch(
         self,

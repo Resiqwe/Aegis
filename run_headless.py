@@ -13,8 +13,6 @@ import time
 import signal
 import argparse
 import glob
-from datetime import datetime
-from pathlib import Path
 
 # Retenční limit: kolik nejnovějších snapshotů a parquet souborů nechat
 MAX_SNAPSHOTS_TO_KEEP = 10
@@ -33,10 +31,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         pass
 
 import torch
-import numpy as np
 
-import scenarios
-import ai_brains
 import engine_core
 import telemetry_logger
 
@@ -158,7 +153,8 @@ def main():
                 w_name = ["ALPHA", "OMEGA", "SOLAR", "PHANTOM"][w_team] if 0 <= w_team < 4 else "REMIZA"
                 dur = rec.get("duration_ticks", 0) / 60.0
                 reason = rec.get("end_reason", "Vítězství")[:26]
-                lvls = "/".join(str(g.level) for g in engine.brains.generals)
+                with engine._engine_lock:
+                    lvls = "/".join(str(g.level) for g in engine.brains.generals)
 
                 print(
                     f"   [Ep #{last_epoch:03d} -> #{engine.current_epoch:03d}] "

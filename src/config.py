@@ -100,7 +100,7 @@ COMMAND_RANKS = (
     "Apex Imperator (Kybernetická dominance)",
 )
 
-# ── Senzory a akce sítě (14 -> 64 -> 64 -> 7) ────────────────────────
+# ── Senzory a akce sítě (14 -> 24 -> 16 -> 7) ────────────────────────
 SENSOR_NAMES = (
     "Cíl Vpřed/Vzad",
     "Cíl Vpravo/Vlevo",

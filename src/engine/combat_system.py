@@ -63,19 +63,55 @@ class CombatSystem:
         if not wants_ability.any():
             return ability_cooldown, active_smokes_gpu, fortress_shield_timer, sniper_focus_timer
 
-        trigger_indices = torch.nonzero(wants_ability).squeeze(1)
-        new_smokes = []
+        # 3. Sniper: Focus Zaměření (vektorizovaně pro všechny aktivující snipry)
+        sniper_mask = wants_ability & (classes == CLASS_SNIPER)
+        if sniper_mask.any():
+            ability_cooldown = torch.where(sniper_mask, torch.full_like(ability_cooldown, 20.0), ability_cooldown)
+            sniper_focus_timer = torch.where(sniper_mask, torch.full_like(sniper_focus_timer, 5.0), sniper_focus_timer)
+            fitness = torch.where(sniper_mask, fitness + 2.0, fitness)
 
-        for idx in trigger_indices:
-            uid = int(idx.item())
-            c_id = int(classes[uid].item())
-            f_id = int(teams[uid].item())
+        # 4. Juggernaut: Fortress Shield (vektorizovaně pro všechny aktivující juggernauty)
+        jugg_mask = wants_ability & (classes == CLASS_JUGGERNAUT)
+        if jugg_mask.any():
+            ability_cooldown = torch.where(jugg_mask, torch.full_like(ability_cooldown, 22.0), ability_cooldown)
+            fortress_shield_timer = torch.where(jugg_mask, torch.full_like(fortress_shield_timer, 6.0), fortress_shield_timer)
+            fitness = torch.where(jugg_mask, fitness + 2.5, fitness)
 
-            # 1. Grunt: Taktický kouř
-            if c_id == CLASS_GRUNT:
+        # 2. Medic: Bio-Pulz
+        medic_mask = wants_ability & (classes == CLASS_MEDIC)
+        if medic_mask.any():
+            ability_cooldown = torch.where(medic_mask, torch.full_like(ability_cooldown, 15.0), ability_cooldown)
+            med_indices = torch.where(medic_mask)[0]
+            for m_uid in med_indices:
+                f_id = teams[m_uid]
+                m_pos = pos[m_uid:m_uid+1]
+                team_mask = alive & (teams == f_id)
+                if team_mask.any():
+                    t_indices = torch.where(team_mask)[0]
+                    dists = torch.norm(pos[t_indices] - m_pos, dim=1)
+                    in_radius = dists <= 180.0
+                    if in_radius.any():
+                        pulse_targets = t_indices[in_radius]
+                        pulse_amount = 35.0
+                        missing_hp = (class_max_hp[pulse_targets] - hp[pulse_targets]).clamp(min=0.0)
+                        actual_pulse = torch.minimum(torch.full_like(missing_hp, pulse_amount), missing_hp)
+
+                        staging_buf.delta_hp.index_add_(0, pulse_targets, actual_pulse)
+                        total_healed = actual_pulse.sum()
+                        healing_done[m_uid] += total_healed
+                        fitness[m_uid] += total_healed * 3.5
+
+        # 1. Grunt: Taktický kouř
+        grunt_mask = wants_ability & (classes == CLASS_GRUNT)
+        if grunt_mask.any():
+            grunt_indices = torch.where(grunt_mask)[0]
+            new_smokes = []
+            for g_uid in grunt_indices:
+                uid = int(g_uid.item())
+                f_id = int(teams[uid].item())
                 team_smokes = 0
                 if active_smokes_gpu.shape[0] > 0:
-                    team_smokes = int((active_smokes_gpu[:, 4] == f_id).sum().item())
+                    team_smokes = int((active_smokes_gpu[:, 4] == float(f_id)).sum().item())
                 if team_smokes < 3:
                     radius = 55.0
                     duration = 6.0
@@ -98,40 +134,8 @@ class CombatSystem:
                                 "life": 1.2,
                                 "col": (120, 140, 130),
                             })
-
-            # 2. Medic: Bio-Pulz (hromadné nárazové vyléčení všech spojenců v rádiusu 180 px)
-            elif c_id == CLASS_MEDIC:
-                ability_cooldown[uid] = 15.0
-                m_pos = pos[uid]
-                team_mask = alive & (teams == f_id)
-                t_indices = torch.nonzero(team_mask).squeeze(1)
-                dists = torch.norm(pos[t_indices] - m_pos, dim=1)
-                in_radius = dists <= 180.0
-                if in_radius.any():
-                    pulse_targets = t_indices[in_radius]
-                    pulse_amount = 35.0
-                    missing_hp = (class_max_hp[pulse_targets] - hp[pulse_targets]).clamp(min=0.0)
-                    actual_pulse = torch.minimum(torch.full_like(missing_hp, pulse_amount), missing_hp)
-
-                    staging_buf.delta_hp.index_add_(0, pulse_targets, actual_pulse)
-                    total_healed = float(actual_pulse.sum().item())
-                    healing_done[uid] += total_healed
-                    fitness[uid] += total_healed * 3.5
-
-            # 3. Sniper: Focus Zaměření (buff na 5.0 s: extrémní zorný úhel a dosah)
-            elif c_id == CLASS_SNIPER:
-                ability_cooldown[uid] = 20.0
-                sniper_focus_timer[uid] = 5.0
-                fitness[uid] += 2.0
-
-            # 4. Juggernaut: Fortress Shield (buff na 6.0 s: ignoruje stagger a snižuje poškození o 50%)
-            elif c_id == CLASS_JUGGERNAUT:
-                ability_cooldown[uid] = 22.0
-                fortress_shield_timer[uid] = 6.0
-                fitness[uid] += 2.5
-
-        if new_smokes:
-            new_t = torch.tensor(new_smokes, dtype=torch.float32, device=self.device)
-            active_smokes_gpu = torch.cat([active_smokes_gpu, new_t], dim=0)
+            if new_smokes:
+                new_t = torch.tensor(new_smokes, dtype=torch.float32, device=self.device)
+                active_smokes_gpu = torch.cat([active_smokes_gpu, new_t], dim=0)
 
         return ability_cooldown, active_smokes_gpu, fortress_shield_timer, sniper_focus_timer

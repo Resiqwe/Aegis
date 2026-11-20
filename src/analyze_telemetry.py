@@ -7,7 +7,6 @@ Spuštění:
 """
 
 import os
-import sys
 import json
 import glob
 import time
@@ -66,7 +65,8 @@ def run_headless_training(n_epochs: int):
             winner = ep_rec.get("winner_team", -1)
             f_names = ["ALPHA", "OMEGA", "SOLAR", "PHANTOM"]
             w_str = f_names[winner] if 0 <= winner < 4 else "REMIZA"
-            lvls = "/".join(str(g.level) for g in engine.brains.generals)
+            with engine._engine_lock:
+                lvls = "/".join(str(g.level) for g in engine.brains.generals)
             print(
                 f"   [✓] Epocha #{last_printed_epoch:02d} dokončena | "
                 f"Vítěz: {w_str:<7} | Úrovně generálů: [{lvls}] | "

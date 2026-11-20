@@ -45,7 +45,6 @@ import time
 import math
 import importlib
 import webbrowser
-from datetime import datetime
 
 import numpy as np
 import torch
@@ -484,10 +483,12 @@ class CyberTacticsLauncher:
         # =====================================================================
         # 2. FRAKČNÍ HERO KARTY (TOP KPI STRIP)
         # =====================================================================
+        bridge_state = self.bridge.get_interpolated_state()
+        if bridge_state is not None:
+            self.last_known_state = bridge_state
         state = self.last_known_state
         if state is None:
-            state = self.engine.get_battle_state_snapshot()
-            self.last_known_state = state
+            state = {}
         strip_y = top_h + 10
         card_h = max(90, int(100 * self.scale))
         card_gap = 12
@@ -498,7 +499,9 @@ class CyberTacticsLauncher:
         generals_meta = state.get("generals", [])
         kills_f = state.get("kills_by_faction", [0, 0, 0, 0])
         deaths_f = state.get("deaths_by_faction", [0, 0, 0, 0])
-        wins_f = getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0])
+        wins_f = state.get("epoch_wins_per_faction", getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0]))
+        init_counts = state.get("initial_team_counts", getattr(self.engine, "initial_team_counts", []))
+        f_techs = state.get("faction_techs", getattr(self.engine, "faction_active_techs", [[] for _ in range(4)]))
 
         for f in range(4):
             cx = 12 + f * (card_w + card_gap)
@@ -511,7 +514,7 @@ class CyberTacticsLauncher:
             pygame.draw.rect(self.screen, f_col, (cx + 8, strip_y, card_w - 16, 3), border_radius=2)
 
             f_alive = alive_counts[f] if f < len(alive_counts) else 0
-            init_c = max(1, self.engine.initial_team_counts[f] if (hasattr(self.engine, "initial_team_counts") and f < len(self.engine.initial_team_counts)) else 100)
+            init_c = max(1, init_counts[f] if f < len(init_counts) else 100)
             eff_pct = int((f_alive / init_c) * 100) if self.sim_active else 100
 
             gen = generals_meta[f] if f < len(generals_meta) else {}
@@ -538,7 +541,6 @@ class CyberTacticsLauncher:
             k_val = kills_f[f] if f < len(kills_f) else 0
             d_val = deaths_f[f] if f < len(deaths_f) else 0
             # Power-Ups frakce
-            f_techs = getattr(self.engine, "faction_active_techs", [[] for _ in range(4)])
             tech_tags = []
             if f < len(f_techs):
                 tag_map = {0: "NANIT", 1: "RADAR", 2: "ŠTÍT", 3: "OC", 4: "SMOKE"}
@@ -580,7 +582,7 @@ class CyberTacticsLauncher:
         radar_rect = pygame.Rect(12 + dock_w + 12, main_y, radar_w, main_h)
         right_rect = pygame.Rect(12 + dock_w + 12 + radar_w + 12, main_y, right_w, main_h)
 
-        self._draw_modern_dock(dock_rect)
+        self._draw_modern_dock(dock_rect, state)
         self._draw_modern_radar(radar_rect, state)
         self._draw_modern_analytics(right_rect, state)
 
@@ -602,8 +604,10 @@ class CyberTacticsLauncher:
         t_perf = self.text_cache.render(self.f_small, run_info, ACCENT_GREEN if self.sim_active else TEXT_MUTED)
         self.screen.blit(t_perf, (W - t_perf.get_width() - 18, bar_y + (foot_h - t_perf.get_height()) // 2))
 
-    def _draw_modern_dock(self, rect: pygame.Rect):
+    def _draw_modern_dock(self, rect: pygame.Rect, state: dict | None = None):
         """Levý řídící dok: Ovládání běhu, parametry mapy a správa modelů."""
+        if state is None:
+            return
         self.draw_card(rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8)
 
         x = rect.x + 14
@@ -623,11 +627,17 @@ class CyberTacticsLauncher:
             st_col = ACCENT_AMBER if self.sim_paused else ACCENT_GREEN
             self.screen.blit(self.text_cache.render(self.f_sub, status_txt, st_col), (x + 10, y + 8))
 
-            ep_num = self.engine.current_epoch
-            t_sec = int(self.engine.operation_time_sec)
-            alive_cnt = int((self.engine.hp > 0.0).sum().item()) if hasattr(self.engine, "hp") else 0
-            tot_cnt = getattr(self.engine, "N", 400)
-            scen_name = scenarios.SCENARIO_NAMES[self.engine.current_scenario_idx].split("(")[0].strip()
+            # Use state snapshot data instead of direct engine tensor access
+            alive_counts = state.get("alive_counts", [0, 0, 0, 0])
+            init_counts = state.get("initial_team_counts", [0, 0, 0, 0])
+            generals_meta = state.get("generals", [])
+
+            ep_num = state.get("current_epoch", self.engine.current_epoch)
+            t_sec = int(state.get("operation_time_sec", self.engine.operation_time_sec))
+            alive_cnt = sum(alive_counts) if len(alive_counts) > 0 else 0
+            tot_cnt = state.get("N", getattr(self.engine, "N", 400))
+            scen_idx = state.get("scenario_idx", self.engine.current_scenario_idx)
+            scen_name = scenarios.SCENARIO_NAMES[scen_idx].split("(")[0].strip()
             self.screen.blit(self.text_cache.render(self.f_small, f"Epocha #{ep_num:02d} • {t_sec//60:02d}:{t_sec%60:02d} • Živých: {alive_cnt}/{tot_cnt}", TEXT_HEAD), (x + 10, y + int(28 * self.scale)))
             self.screen.blit(self.text_cache.render(self.f_tiny, f"Mapa: {scen_name}", TEXT_MUTED), (x + 10, y + int(48 * self.scale)))
         else:
@@ -884,7 +894,7 @@ class CyberTacticsLauncher:
         graph_rect = pygame.Rect(x, y, w, max(40, ev_h - 22))
         self.draw_card(graph_rect, bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
 
-        hist = getattr(self.engine.brains, "history_avg_fitness", [[] for _ in range(4)]) if (hasattr(self.engine, "brains")) else [[] for _ in range(4)]
+        hist = state.get("history_avg_fitness", [[] for _ in range(4)])
         all_v = [val for f_s in hist for val in list(f_s)[-30:]]
         if not all_v and self.epochs_data:
             for ep in self.epochs_data[-25:]:
@@ -1108,7 +1118,7 @@ class CyberTacticsLauncher:
                     if hasattr(self, "snapshot_box_rect") and self.snapshot_box_rect.collidepoint(mx, my):
                         self.snapshot_scroll_offset = max(0, self.snapshot_scroll_offset - ev.y)
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                    self.handle_click(*ev.pos)
+                    self.handle_click(*pygame.mouse.get_pos())
 
             t0_rend = time.perf_counter()
             self.render()

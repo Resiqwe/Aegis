@@ -2,7 +2,7 @@
 objectives_system.py - Správa strategických nodů, zničitelných bran a vyhodnocení vítězství.
 """
 
-import math
+import threading
 import numpy as np
 import torch
 from config import CLASS_JUGGERNAUT, MAX_OPERATION_DURATION
@@ -11,6 +11,7 @@ from config import CLASS_JUGGERNAUT, MAX_OPERATION_DURATION
 class ObjectivesSystem:
     def __init__(self, device: torch.device):
         self.device = device
+        self._lock = threading.RLock()
 
     def update_control_nodes(
         self,
@@ -119,32 +120,33 @@ class ObjectivesSystem:
         Vrací (is_finished, winner_team, reason).
         Tie-breaking: Kills * 3.0 + NodePoints * 2.5 + AliveUnits
         """
-        alive_teams = teams[alive].long()
-        cnts = torch.bincount(alive_teams, minlength=n_factions).cpu().numpy()
-        alive_counts = [int(c) for c in cnts]
-        combat_effective = []
+        with self._lock:
+            alive_teams = teams[alive].long()
+            cnts = torch.bincount(alive_teams, minlength=n_factions).cpu().numpy()
+            alive_counts = [int(c) for c in cnts]
+            combat_effective = []
 
-        for f in range(n_factions):
-            c = alive_counts[f]
-            init_c = initial_team_counts[f] if f < len(initial_team_counts) else 100
-            if c >= max(3, int(init_c * 0.22)):
-                combat_effective.append(f)
+            for f in range(n_factions):
+                c = alive_counts[f]
+                init_c = initial_team_counts[f] if f < len(initial_team_counts) else 100
+                if c >= max(3, int(init_c * 0.22)):
+                    combat_effective.append(f)
 
-        if len(combat_effective) == 1 and operation_time_sec > 4.0:
-            return True, combat_effective[0], "KAPITULACE ODPŮRCŮ (Bojeschopnost < 22 %)"
+            if len(combat_effective) == 1 and operation_time_sec > 4.0:
+                return True, combat_effective[0], "KAPITULACE ODPŮRCŮ (Bojeschopnost < 22 %)"
 
-        if len(combat_effective) == 0 and operation_time_sec > 4.0:
-            winner = int(np.argmax(alive_counts))
-            return True, winner, "TOTÁLNÍ VYČERPÁNÍ SIL"
+            if len(combat_effective) == 0 and operation_time_sec > 4.0:
+                winner = int(np.argmax(alive_counts))
+                return True, winner, "TOTÁLNÍ VYČERPÁNÍ SIL"
 
-        if operation_time_sec >= max_duration:
-            nc_cpu = node_control_points.cpu().numpy()
-            k_cpu = kills_per_faction.cpu().numpy()
-            scores = [
-                k_cpu[f] * 3.0 + nc_cpu[f] * 2.5 + alive_counts[f]
-                for f in range(n_factions)
-            ]
-            winner = int(np.argmax(scores))
-            return True, winner, f"VYPRŠENÍ OPERAČNÍHO ČASU ({int(max_duration)}s)"
+            if operation_time_sec >= max_duration:
+                nc_cpu = node_control_points.cpu().numpy()
+                k_cpu = kills_per_faction.cpu().numpy()
+                scores = [
+                    k_cpu[f] * 3.0 + nc_cpu[f] * 2.5 + alive_counts[f]
+                    for f in range(n_factions)
+                ]
+                winner = int(np.argmax(scores))
+                return True, winner, f"VYPRŠENÍ OPERAČNÍHO ČASU ({int(max_duration)}s)"
 
-        return False, -1, ""
+            return False, -1, ""
