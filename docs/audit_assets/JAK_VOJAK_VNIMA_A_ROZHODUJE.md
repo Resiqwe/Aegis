@@ -41,7 +41,7 @@ cover_right = -cover_dir[:, 0] * sin_th + cover_dir[:, 1] * cos_th
 # ==============================================================
 sensors[:, 0]  = enemy_fwd                                           # Směr k cíli: Vpřed / Vzad (-1..+1)
 sensors[:, 1]  = enemy_right                                         # Směr k cíli: Vpravo / Vlevo (-1..+1)
-sensors[:, 2]  = (1.0 - (dist_enemy / self.class_range)).clamp(-1, 1)# Vzdálenost k cíli (v dostřelu zbraně?)
+sensors[:, 2]  = (1.0 - (dist_enemy / self.class_range)).clamp(-1, 1)# Vzdálenost k cíli (v dostřel u zbraně?)
 sensors[:, 3]  = fire_fwd                                            # Příchozí střely: Vpřed / Vzad
 sensors[:, 4]  = fire_right                                          # Příchozí střely: Vpravo / Vlevo
 sensors[:, 5]  = order_fwd                                           # Rozkaz generála: Vpřed / Vzad
@@ -72,7 +72,7 @@ def tactical_brain_forward(
     """
     x: Tenzor 14 vjemů vojáka (Batch, 14)
     W1, W2, W3: Matice vah (synapse v mozku vyvíjené evolucí)
-    b1, b2, b3: Prahové biasy neuronů
+    b1, b2, b3: Prahové bias neuronů
     """
     x_3d = x.unsqueeze(1)
     

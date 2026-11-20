@@ -1,0 +1,106 @@
+.\ast_rentgen.py:6: "cpu", "numpy", "tolist", "start_new_operation",
+.\ast_rentgen.py:7: "get_battle_state_snapshot", "synchronize", "pos", "teams", "hp", "brains"
+.\launcher.py:415: pygame.event.clear(pygame.MOUSEBUTTONUP)
+.\launcher.py:416: pygame.event.clear(pygame.MOUSEBUTTONDOWN)
+.\launcher.py:1092: for ev in pygame.event.get():
+.\scan.py:3: patterns = re.compile(r"(threading\.|Lock\(|Queue\(|start_new_operation|get_battle_state_snapshot|\.cpu\(\)|cuda\.synchronize|pygame\.event|tkinter|PyQt|dpg\.)")
+.\archive\arena_a_prototypy\arena_gui.py:17: import tkinter as tk
+.\archive\arena_a_prototypy\arena_gui.py:18: from tkinter import ttk
+.\archive\arena_a_prototypy\arena_gui.py:280: torch.cuda.synchronize()
+.\archive\arena_a_prototypy\arena_gui.py:283: decisions = actions_gpu.cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:22: import tkinter as tk
+.\archive\arena_a_prototypy\arena_pro.py:23: from tkinter import ttk
+.\archive\arena_a_prototypy\arena_pro.py:139: heal_pos = self.pos[heal].cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:161: p_from = self.pos[sel].cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:162: p_to = self.pos[target_indices[sel]].cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:163: t_arr = self.teams[sel].cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:172: d_pos = self.pos[just_died].cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:214: torch.cuda.synchronize()
+.\archive\arena_a_prototypy\arena_pro.py:426: pos_np = self.sim.pos.cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:427: hp_np = self.sim.hp.cpu().numpy()
+.\archive\arena_a_prototypy\arena_pro.py:428: team_np = self.sim.teams.cpu().numpy()
+.\archive\arena_a_prototypy\arena_sim.py:112: torch.cuda.synchronize()
+.\archive\arena_a_prototypy\arena_sim.py:115: decisions = actions_gpu.cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:24: import tkinter as tk
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:25: from tkinter import ttk
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:170: h_pos = self.pos[heal].cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:188: p1 = self.pos[sel].cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:189: p2 = self.pos[target_indices[sel]].cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:190: t_arr = self.teams[sel].cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:197: d_pos = self.pos[newly_dead].cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:243: torch.cuda.synchronize()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:494: pos_np = self.engine.pos.cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:495: hp_np = self.engine.hp.cpu().numpy()
+.\archive\arena_a_prototypy\cyber_war_sandbox.py:496: team_np = self.engine.teams.cpu().numpy()
+.\archive\legacy_benchmarks\benchmark_comparison.py:108: torch.cuda.synchronize()
+.\archive\legacy_benchmarks\benchmark_comparison.py:113: torch.cuda.synchronize()
+.\archive\legacy_benchmarks\game_state_benchmark.py:101: torch.cuda.synchronize()
+.\archive\legacy_benchmarks\game_state_benchmark.py:107: torch.cuda.synchronize()
+.\archive\legacy_benchmarks\game_state_benchmark.py:118: sample_actions = actions_gpu[:100_000].cpu().numpy()
+.\archive\legacy_benchmarks\rtx_blob_benchmark.py:50: torch.cuda.synchronize()
+.\archive\legacy_benchmarks\rtx_blob_benchmark.py:61: torch.cuda.synchronize() # Čekáme, až GPU dokončí celý výpočet
+.\archive\legacy_benchmarks\rtx_blob_benchmark.py:78: sample_in = inputs[:100_000].cpu().numpy().astype(int)
+.\archive\legacy_benchmarks\rtx_blob_benchmark.py:79: sample_out = out_bits[:100_000].cpu().numpy()
+.\src\ai_brains.py:60: self._lock = threading.RLock()
+.\src\ai_brains.py:103: t_probs = torch.sigmoid(self.tech_weights[unlocked_techs]).cpu().numpy()
+.\src\ai_brains.py:146: probs = torch.softmax(masked_w, dim=0).cpu().numpy()
+.\src\ai_brains.py:176: self._lock = threading.RLock()
+.\src\ai_brains.py:293: out = torch.cat([surge_sway_yaw, trigger, stance, ability, ping], dim=2).squeeze().cpu().numpy()
+.\src\ai_brains.py:295: h1_np = h1.squeeze().cpu().numpy()
+.\src\ai_brains.py:296: h2_np = h2.squeeze().cpu().numpy()
+.\src\ai_brains.py:297: s_np = sensor_vec.cpu().numpy()
+.\src\engine_core.py:66: self._engine_lock = threading.RLock()
+.\src\engine_core.py:167: self.start_new_operation(restart_all=False)
+.\src\engine_core.py:173: self.start_new_operation(restart_all=True)
+.\src\engine_core.py:175: def start_new_operation(self, restart_all: bool = False):
+.\src\engine_core.py:1312: pos_k = self.pos[k_t].cpu().numpy()
+.\src\engine_core.py:1313: teams_k = self.teams[k_t].cpu().numpy()
+.\src\engine_core.py:1314: classes_k = self.classes[k_t].cpu().numpy()
+.\src\engine_core.py:1343: def get_battle_state_snapshot(self) -> dict:
+.\src\engine_core.py:1372: packed_cpu = packed_gpu.cpu().numpy()
+.\src\engine_core.py:1375: tracers_p1_np = self.active_tracers_p1.cpu().numpy()
+.\src\engine_core.py:1376: tracers_p2_np = self.active_tracers_p2.cpu().numpy()
+.\src\engine_core.py:1377: tracers_team_np = self.active_tracers_team.cpu().numpy()
+.\src\engine_core.py:1378: heals_p1_np = self.active_heals_p1.cpu().numpy()
+.\src\engine_core.py:1379: heals_p2_np = self.active_heals_p2.cpu().numpy()
+.\src\engine_core.py:1380: sparks_np = self.hit_sparks.cpu().numpy()
+.\src\engine_core.py:1381: armor_sparks_np = self.armor_sparks.cpu().numpy()
+.\src\engine_core.py:1382: sniper_lasers_np = self.sniper_lasers.cpu().numpy()
+.\src\engine_core.py:1383: smokes_np = self.active_smokes_gpu.cpu().numpy()
+.\src\engine_core.py:1384: nodes_np = self.nodes_gpu.cpu().numpy()
+.\src\engine_core.py:1385: node_pts_np = self.node_control_points.cpu().numpy()
+.\src\engine_core.py:1386: kills_per_faction_list = self.kills_per_faction.cpu().tolist()
+.\src\engine_core.py:1562: tar_pos = p_tar.cpu().numpy().tolist()
+.\src\engine_core.py:1570: "pos": self.pos[unit_idx].cpu().numpy(),
+.\src\tactical_hud.py:252: for ev in pygame.event.get():
+.\src\tactical_hud.py:375: pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+.\src\telemetry_lab.py:70: self._lock = threading.RLock()
+.\src\telemetry_logger.py:21: _json_lock = threading.RLock()
+.\src\telemetry_logger.py:34: return o.detach().cpu().tolist()
+.\src\telemetry_logger.py:210: "generals_weights": [g.composition_weights.cpu() for g in engine.brains.generals],
+.\src\telemetry_logger.py:213: "brains_W1_full": engine.brains.W1.cpu(),
+.\src\telemetry_logger.py:214: "brains_b1_full": engine.brains.b1.cpu(),
+.\src\telemetry_logger.py:215: "brains_W2_full": engine.brains.W2.cpu(),
+.\src\telemetry_logger.py:216: "brains_b2_full": engine.brains.b2.cpu(),
+.\src\telemetry_logger.py:217: "brains_W3_full": getattr(engine.brains, 'W3', engine.brains.W2).cpu(),
+.\src\telemetry_logger.py:218: "brains_b3_full": getattr(engine.brains, 'b3', engine.brains.b2).cpu(),
+.\src\telemetry_logger.py:220: "brains_W1": engine.brains.W1[:engine.N].cpu(),
+.\src\telemetry_logger.py:221: "brains_b1": engine.brains.b1[:engine.N].cpu(),
+.\src\telemetry_logger.py:222: "brains_W2": engine.brains.W2[:engine.N].cpu(),
+.\src\telemetry_logger.py:223: "brains_b2": engine.brains.b2[:engine.N].cpu(),
+.\src\telemetry_logger.py:225: "teams": engine.teams.cpu(),
+.\src\telemetry_logger.py:226: "classes": engine.classes.cpu(),
+.\src\telemetry_logger.py:227: "fitness": engine.fitness.cpu(),
+.\src\telemetry_logger.py:309: engine.start_new_operation(restart_all=False)
+.\src\engine\async_runner.py:28: self._stop_requested = threading.Event()
+.\src\engine\async_runner.py:29: self.command_queue = queue.Queue()
+.\src\engine\async_runner.py:63: self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="Aegis-SimWorker")
+.\src\engine\async_runner.py:90: elif cmd_name == "start_new_operation":
+.\src\engine\async_runner.py:91: self.engine.start_new_operation(*args, **kwargs)
+.\src\engine\async_runner.py:105: snapshot = self.engine.get_battle_state_snapshot()
+.\src\engine\objectives_system.py:15: self._lock = threading.RLock()
+.\src\engine\objectives_system.py:126: cnts = torch.bincount(alive_teams, minlength=n_factions).cpu().numpy()
+.\src\engine\objectives_system.py:144: nc_cpu = node_control_points.cpu().numpy()
+.\src\engine\objectives_system.py:145: k_cpu = kills_per_faction.cpu().numpy()
+.\src\engine\state_bridge.py:68: self._lock = threading.Lock()
+.\tests\test_suite.py:79: snapshot = engine.get_battle_state_snapshot()

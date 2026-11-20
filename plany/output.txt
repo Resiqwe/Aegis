@@ -1,0 +1,418 @@
+Created At: 2026-11-19T00:16:55+01:00
+Completed At: 2026-11-19T00:16:57+01:00
+Command exited with code 0.
+
+Command output:
+--- src/engine_core.py:500-520 ---
+ 500:             vec = nodes_xy[target_n] - self.pos
+ 501:             norm = torch.norm(vec, dim=1, keepdim=True).clamp(min=1.0)
+ 502:             return vec / norm
+ 503: 
+ 504:     def step(self, dt: float = 0.0166):
+ 505:         with self._engine_lock:
+ 506:             self._step_internal(dt)
+ 507: 
+ 508:     def _step_internal(self, dt: float = 0.0166):
+ 509:         with self._engine_lock:
+ 510:             self.operation_time_sec += dt
+ 511:             self.tick_counter += 1
+ 512:             N = self.N
+ 513:             alive = self.hp > 0.0
+ 514: 
+ 515:             if (self.tick_counter % 10 == 0 or self.operation_time_sec >= self.MAX_OPERATION_DURATION) and self._check_battle_status(alive):
+ 516:                 self.finish_operation_and_evolve()
+ 517:                 return
+ 518: 
+ 519:             alive_idx = torch.where(alive)[0]
+ 520:             K = alive_idx.numel()
+--- src/engine_core.py:1200-1225 ---
+1200:                 t_alive = self.teams[alive_idx].long()
+1201:                 step_scale = 6.0
+1202:                 num_nodes = self.nodes_gpu.shape[0]
+1203:                 for i in range(num_nodes):
+1204:                     nx = self.nodes_gpu[i, 0]
+1205:                     ny = self.nodes_gpu[i, 1]
+1206:                     nr = self.nodes_gpu[i, 2]
+1207:                     n_owner = int(self.nodes_gpu[i, 3].item())
+1208:                     n_cap = self.nodes_gpu[i, 4]
+1209: 
+1210:                     dists_sq = (p_alive[:, 0] - nx) ** 2 + (p_alive[:, 1] - ny) ** 2
+1211:                     in_node = dists_sq <= (nr * nr)
+1212:                     if in_node.any():
+1213:                         pres_t = t_alive[in_node]
+1214:                         cnts = torch.bincount(pres_t, minlength=4)
+1215:                         dom_t = int(torch.argmax(cnts).item())
+1216:                         cnt_dom = cnts[dom_t]
+1217:                         cnt_other = cnts.sum() - cnt_dom
+1218: 
+1219:                         if cnt_dom > cnt_other:
+1220:                             capturing_units = alive_idx[in_node & (t_alive == dom_t)]
+1221:                             is_grunt = self.classes[capturing_units] == CLASS_GRUNT
+1222:                             # Pěšák dostává masivní bonus za obsazování uzlu (+250% oproti ostatním)
+1223:                             bonus_mult = torch.where(is_grunt, 2.5, 1.0)
+1224:                             if n_owner == dom_t:
+1225:                                 if n_cap < 1.0:
+--- src/engine_core.py:1340-1375 ---
+1340:                 # Aktualizace zabití frakcí
+1341:                 t_victims = self.teams[k_t].long()
+1342:             
+1343:                 # Zjištění, kdo cíl zasáhl, a korektní atribuce killu
+1344:                 for ki, victim_idx in enumerate(k_t):
+1345:                     v_id = int(victim_idx.item())
+1346:                     shooter_id = int(buf.last_attacker_id[v_id].item())
+1347:                     if 0 <= shooter_id < self.N:
+1348:                         self.unit_kills[shooter_id] += 1
+1349:                         killer_team = int(self.teams[shooter_id].item())
+1350:                         self.kills_per_faction[killer_team] += 1
+1351:                         self.fitness[shooter_id] += 30.0
+1352: 
+1353:                         if self.telemetry_mgr:
+1354:                             self.telemetry_mgr.record_kill_event(
+1355:                                 epoch=self.current_epoch,
+1356:                                 time_sec=self.operation_time_sec,
+1357:                                 killer_team=killer_team,
+1358:                                 victim_team=int(self.teams[v_id].item()),
+1359:                                 killer_class=int(self.classes[shooter_id].item()),
+1360:                                 victim_class=int(self.classes[v_id].item()),
+1361:                                 x=float(self.pos[v_id, 0].item()),
+1362:                                 y=float(self.pos[v_id, 1].item()),
+1363:                             )
+1364: 
+1365:                 pos_k = self.pos[k_t].cpu().numpy()
+1366:                 teams_k = self.teams[k_t].cpu().numpy()
+1367:                 classes_k = self.classes[k_t].cpu().numpy()
+1368: 
+1369:                 if self.visual_mode:
+1370:                     for ki in range(len(k_t)):
+1371:                         col_t = FACTION_COLORS[int(teams_k[ki])]
+1372:                         for _ in range(8):
+1373:                             ang_p = float(np.random.rand() * 2 * math.pi)
+1374:                             spd_p = float(np.random.rand() * 3.5 + 1.0)
+1375:                             self.particles.append({
+--- src/ai_brains.py:170-210 ---
+ 170:     Třídně izolovaný hierarchický genofond (14 -> 64 -> 64 -> 7).
+ 171:     4 frakce x 4 třídy x 50 slotů = 800 slotů v GPU paměti.
+ 172:     """
+ 173:     def __init__(self, device: torch.device):
+ 174:         self.device = device
+ 175:         self.dtype = torch.float32
+ 176:         self._lock = threading.RLock()
+ 177: 
+ 178:         self.N_IN = SENSOR_COUNT    # 14
+ 179:         self.N_H1 = 24
+ 180:         self.N_H2 = 16
+ 181:         self.N_OUT = ACTION_COUNT   # 7
+ 182:         self.N_FACTIONS = 4
+ 183:         self.N_CLASSES = 4
+ 184:         self.SLOTS_PER_CLASS = 50
+ 185:         self.SLOTS_PER_FACTION = self.N_CLASSES * self.SLOTS_PER_CLASS  # 200
+ 186:         self.MAX_UNITS = self.N_FACTIONS * self.SLOTS_PER_FACTION        # 800
+ 187: 
+ 188:         self.W1 = torch.zeros((self.MAX_UNITS, self.N_IN, self.N_H1), dtype=self.dtype, device=device)
+ 189:         self.b1 = torch.zeros((self.MAX_UNITS, 1, self.N_H1), dtype=self.dtype, device=device)
+ 190:         self.W2 = torch.zeros((self.MAX_UNITS, self.N_H1, self.N_H2), dtype=self.dtype, device=device)
+ 191:         self.b2 = torch.zeros((self.MAX_UNITS, 1, self.N_H2), dtype=self.dtype, device=device)
+ 192:         self.W3 = torch.zeros((self.MAX_UNITS, self.N_H2, self.N_OUT), dtype=self.dtype, device=device)
+ 193:         self.b3 = torch.zeros((self.MAX_UNITS, 1, self.N_OUT), dtype=self.dtype, device=device)
+ 194: 
+ 195:         self.generals = [FactionGeneralBrain(f, device) for f in range(4)]
+ 196: 
+ 197:         self.epoch_number = 1
+ 198:         self.history_best_fitness = [deque(maxlen=100) for _ in range(4)]
+ 199:         self.history_avg_fitness = [deque(maxlen=100) for _ in range(4)]
+ 200:         self.stagnation_counter = [0, 0, 0, 0]
+ 201: 
+ 202:         self._init_all_banks()
+ 203: 
+ 204:     def _init_all_banks(self):
+ 205:         """Inicializuje váhy s vrozenými reflexy pro všech 7 akcí."""
+ 206:         self.W1.normal_(0.0, 0.28)
+ 207:         self.b1.zero_()
+ 208:         self.W2.normal_(0.0, 0.25)
+ 209:         self.b2.zero_()
+ 210:         self.W3.normal_(0.0, 0.22)
+--- src/ai_brains.py:308-330 ---
+ 308:                 }
+ 309: 
+ 310:     def evolve_epoch(
+ 311:         self,
+ 312:         brain_slots: torch.Tensor,
+ 313:         teams: torch.Tensor,
+ 314:         classes: torch.Tensor,
+ 315:         fitness: torch.Tensor,
+ 316:         n_factions: int,
+ 317:         winner_team: int = -1,
+ 318:         mutation_rate: float = 0.08,
+ 319:     ):
+ 320:         self.epoch_number += 1
+ 321: 
+ 322:         for f in range(n_factions):
+ 323:             f_mask = teams == f
+ 324:             f_indices = torch.where(f_mask)[0]
+ 325:             if f_indices.numel() < 4:
+ 326:                 continue
+ 327: 
+ 328:             f_fit = fitness[f_indices]
+ 329:             f_classes = classes[f_indices]
+ 330:             f_slots = brain_slots[f_indices]
+--- src/engine/async_runner.py:55-130 ---
+  55: 
+  56:     def start(self):
+  57:         """Spustí simulační vlákno."""
+  58:         if self._thread is not None and self._thread.is_alive():
+  59:             return
+  60:         self._stop_requested.clear()
+  61:         self._running = True
+  62:         self._paused = False
+  63:         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="Aegis-SimWorker")
+  64:         self._thread.start()
+  65: 
+  66:     def stop(self, join_timeout: float = 3.0):
+  67:         """Ukončí simulační vlákno s garantovaným joinem."""
+  68:         self._stop_requested.set()
+  69:         self._running = False
+  70:         if self._thread is not None and self._thread.is_alive():
+  71:             self._thread.join(timeout=join_timeout)
+  72:         self._thread = None
+  73: 
+  74:     def post_command(self, cmd_name: str, *args, **kwargs):
+  75:         """Odešle příkaz do simulačního vlákna (bezpečné volání z libovolného vlákna)."""
+  76:         self.command_queue.put((cmd_name, args, kwargs))
+  77: 
+  78:     def _process_commands(self):
+  79:         """Zpracuje všechny čekající GUI příkazy v kontextu simulačního workeru."""
+  80:         while not self.command_queue.empty():
+  81:             try:
+  82:                 cmd_name, args, kwargs = self.command_queue.get_nowait()
+  83:                 with self.engine._engine_lock:
+  84:                     if callable(cmd_name):
+  85:                         cmd_name(self.engine, *args, **kwargs)
+  86:                     elif cmd_name == "switch_scenario":
+  87:                         self.engine.switch_scenario(*args, **kwargs)
+  88:                     elif cmd_name == "set_doctrine" or cmd_name == "set_faction_doctrine":
+  89:                         self.engine.set_faction_doctrine(*args, **kwargs)
+  90:                     elif cmd_name == "start_new_operation":
+  91:                         self.engine.start_new_operation(*args, **kwargs)
+  92:                     elif cmd_name == "configure":
+  93:                         self.engine.configure(*args, **kwargs)
+  94:                     elif cmd_name in ("force_evolve", "finish_operation_and_evolve"):
+  95:                         self.engine.finish_operation_and_evolve()
+  96:                     elif hasattr(self.engine, cmd_name):
+  97:                         getattr(self.engine, cmd_name)(*args, **kwargs)
+  98:             except Exception as e:
+  99:                 print(f"[AsyncSimulationWorker] Chyba při zpracování příkazu {cmd_name}: {e}")
+ 100: 
+ 101:     def _build_snapshot(self) -> dict:
+ 102:         """Sestaví kompletní CPU snapshot včetně inspekce sledované jednotky pod jedním zámkem."""
+ 103:         target_id, auto_best = self.bridge.get_selected_unit_request()
+ 104:         with self.engine._engine_lock:
+ 105:             snapshot = self.engine.get_battle_state_snapshot()
+ 106:             if (
+ 107:                 auto_best
+ 108:                 or target_id is None
+ 109:                 or not (0 <= target_id < self.engine.N)
+ 110:                 or float(self.engine.hp[target_id].item()) <= 0.0
+ 111:             ):
+ 112:                 resolved_id = self.engine.get_best_alive_unit()
+ 113:             else:
+ 114:                 resolved_id = target_id
+ 115:             inspected = self.engine.inspect_unit(resolved_id)
+ 116:             snapshot["inspected_unit"] = inspected
+ 117:             snapshot["selected_unit_id"] = inspected["unit_idx"] if inspected is not None else None
+ 118:             return snapshot
+ 119: 
+ 120:     def _worker_loop(self):
+ 121:         """
+ 122:         Vnitřní smyčka worker vlákna s precizním time-accumulator řízením.
+ 123:         """
+ 124:         last_time = time.perf_counter()
+ 125:         accumulator = 0.0
+ 126:         sim_dt = self.fixed_dt
+ 127:         last_snap_time = 0.0
+ 128:         snap_interval = 1.0 / 30.0  # Maximálně 30 snapshotů za sekundu (odlehčení PCIe a GILu)
+ 129: 
+ 130:         # Počáteční publikace stavu
+--- src/tactical_hud.py:270-285 ---
+ 270:                         else pygame.display.set_mode((1720, 960), pygame.RESIZABLE | pygame.DOUBLEBUF)
+ 271:                     )
+ 272:                     self._rebuild_fonts()
+ 273:                 elif ev.key == pygame.K_e:
+ 274:                     if hasattr(self, "worker") and self.worker is not None:
+ 275:                         self.worker.post_command("force_evolve")
+ 276:                     else:
+ 277:                         self.engine.finish_operation_and_evolve()
+ 278:                     self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na evoluci zařazen")
+ 279:                 elif ev.key == pygame.K_t:
+ 280:                     self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
+ 281:                     self.show_banner(f"Rychlost tréninku: {self.speed_presets[self.speed_idx]:g}x")
+ 282:                 elif ev.key == pygame.K_F5 or (ev.key == pygame.K_s and (pygame.key.get_mods() & pygame.KMOD_CTRL)):
+ 283:                     path = self.telemetry.save_snapshot(self.engine)
+ 284:                     self.show_banner(f"Uložen snapshot [F5/Ctrl+S]: {os.path.basename(path)}")
+ 285:                 elif ev.key == pygame.K_l:
+--- src/tactical_hud.py:378-428 ---
+ 378:             self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0)
+ 379:         elif key == "next_epoch":
+ 380:             if hasattr(self, "worker") and self.worker is not None:
+ 381:                 self.worker.post_command("force_evolve")
+ 382:             else:
+ 383:                 self.engine.finish_operation_and_evolve()
+ 384:             self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
+ 385:         elif key.startswith("speed_"):
+ 386:             self.speed_idx = int(key.split("_")[1])
+ 387:             self.show_banner(f"[BLESK] Rychlost simulace nastavena: {self.speed_presets[self.speed_idx]:g}x", 2.0)
+ 388:         elif key == "toggle_follow":
+ 389:             self.follow_selected = not self.follow_selected
+ 390:             self.show_banner("Sledování kamery: " + ("ZAPNUTO [Kamera sleduje cíl]" if self.follow_selected else "VYPNUTO [Volná kamera]"), 2.0)
+ 391:         elif key == "cycle_speed":
+ 392:             self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
+ 393:             self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0)
+ 394:         elif key == "cycle_scenario":
+ 395:             next_scen = (self.engine.current_scenario_idx + 1) % 3
+ 396:             if hasattr(self, "worker") and self.worker is not None:
+ 397:                 self.worker.post_command("switch_scenario", next_scen)
+ 398:             else:
+ 399:                 self.engine.switch_scenario(next_scen)
+ 400:             scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
+ 401:             self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
+ 402:         elif key == "cycle_units":
+ 403:             self.unit_preset_idx = (self.unit_preset_idx + 1) % len(self.unit_presets)
+ 404:             self.reboot_simulation()
+ 405:             self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0)
+ 406:         elif key == "save_snap":
+ 407:             path = self.telemetry.save_snapshot(self.engine)
+ 408:             self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
+ 409:         elif key == "load_snap":
+ 410:             snaps = self.telemetry.list_available_snapshots()
+ 411:             if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
+ 412:                 self.show_banner(f"[NACIST] Načten model: {os.path.basename(snaps[0])}", 3.0)
+ 413:             else:
+ 414:                 self.show_banner("[VAROVANI] Žádný snapshot k načtení nenalezen!", 3.0)
+ 415:         elif key.startswith("doc_"):
+ 416:             f_id = int(key.split("_")[1])
+ 417:             new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
+ 418:             if hasattr(self, "worker") and self.worker is not None:
+ 419:                 self.worker.post_command("set_doctrine", f_id, new_doc)
+ 420:             else:
+ 421:                 self.engine.set_faction_doctrine(f_id, new_doc)
+ 422:             doc_name = DOCTRINE_LIST[new_doc]
+ 423:             doc_desc = {
+ 424:                 "BALANCED": "Vyvážený taktický postup a obsazování",
+ 425:                 "RUSH": "Agresivní útok na střed a rychlý střet",
+ 426:                 "HOLD": "Obranná formace a držení klíčových pozic",
+ 427:                 "SKIRMISH": "Průzkum, odstup a dálkové ostřelování"
+ 428:             }.get(doc_name, "")
+--- launcher.py:955-978 ---
+ 955:                             self.set_status("Změna mapy není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+ 956:                         else:
+ 957:                             self.selected_scenario = int(key.split("_")[1])
+ 958:                             self.engine.switch_scenario(self.selected_scenario)
+ 959:                             self.set_status(f"Nastavena mapa: {scenarios.SCENARIO_NAMES[self.selected_scenario].split('(')[0].strip()}", ACCENT_CYAN)
+ 960:                     elif key.startswith("units_"):
+ 961:                         if self.sim_active:
+ 962:                             self.set_status("Změna počtu jednotek není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+ 963:                         else:
+ 964:                             self.selected_units_idx = int(key.split("_")[1])
+ 965:                             self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
+ 966:                             self.set_status(f"Nastaven rozpočet operace: {self.budget_presets[self.selected_units_idx]} b. na frakci.", ACCENT_CYAN)
+ 967:                     elif key == "mode_new":
+ 968:                         self.start_from_snapshot = False
+ 969:                         self.set_status("Vybrán režim: Čistá kampaň (nová evoluce).", ACCENT_GREEN)
+ 970:                     elif key == "mode_snap":
+ 971:                         if not self.snapshots:
+ 972:                             self.set_status("V archivu není žádný snapshot pro načtení!", ACCENT_ROSE)
+ 973:                         else:
+ 974:                             self.start_from_snapshot = True
+ 975:                             snap_n = os.path.basename(self.snapshots[self.selected_snapshot_idx])
+ 976:                             self.set_status(f"Vybrán režim: Ze snapshotu ({snap_n}).", ACCENT_CYAN)
+ 977:                     elif key == "start_continuous":
+ 978:                         self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot)
+--- src/telemetry_logger.py:185-260 ---
+ 185:     def save_snapshot(
+ 186:         self,
+ 187:         engine,
+ 188:         custom_tag: str = "",
+ 189:     ) -> str:
+ 190:         """Uloží kompletní stav kampaně, všech 4 genetických bank mozků a generálů do binárního souboru .pt."""
+ 191:         with engine._engine_lock:
+ 192:             self._ensure_session_header()
+ 193:             tag_part = f"_{custom_tag}" if custom_tag else ""
+ 194:             filename = f"snapshot_{self.session_id}_epoch_{engine.current_epoch:03d}{tag_part}.pt"
+ 195:             filepath = os.path.join(self.output_dir, filename)
+ 196: 
+ 197:             snapshot_data = {
+ 198:                 "session_id": self.session_id,
+ 199:                 "timestamp": datetime.now().isoformat(),
+ 200:                 "epoch": engine.current_epoch,
+ 201:                 "scenario_idx": engine.current_scenario_idx,
+ 202:                 "n_units": engine.N,
+ 203:                 "n_factions": engine.n_factions,
+ 204:                 "budget_per_faction": getattr(engine, "budget_per_faction", 100),
+ 205:                 "wins_per_faction": engine.epoch_wins_per_faction,
+ 206:                 "faction_doctrines": engine.faction_doctrines,
+ 207:                 # Stav generálů (XP, Level, kompoziční preference, EMA ROI)
+ 208:                 "generals_xp": [float(g.xp) for g in engine.brains.generals],
+ 209:                 "generals_level": [int(g.level) for g in engine.brains.generals],
+ 210:                 "generals_weights": [g.composition_weights.cpu() for g in engine.brains.generals],
+ 211:                 "generals_roi_ema": [list(g.class_roi_ema) for g in engine.brains.generals],
+ 212:                 # Kompletní genetické banky všech 4 frakcí (MAX_UNITS = 800)
+ 213:                 "brains_W1_full": engine.brains.W1.cpu(),
+ 214:                 "brains_b1_full": engine.brains.b1.cpu(),
+ 215:                 "brains_W2_full": engine.brains.W2.cpu(),
+ 216:                 "brains_b2_full": engine.brains.b2.cpu(),
+ 217:                 "brains_W3_full": getattr(engine.brains, 'W3', engine.brains.W2).cpu(),
+ 218:                 "brains_b3_full": getattr(engine.brains, 'b3', engine.brains.b2).cpu(),
+ 219:                 # Zpětná kompatibilita
+ 220:                 "brains_W1": engine.brains.W1[:engine.N].cpu(),
+ 221:                 "brains_b1": engine.brains.b1[:engine.N].cpu(),
+ 222:                 "brains_W2": engine.brains.W2[:engine.N].cpu(),
+ 223:                 "brains_b2": engine.brains.b2[:engine.N].cpu(),
+ 224:                 # Stav populace
+ 225:                 "teams": engine.teams.cpu(),
+ 226:                 "classes": engine.classes.cpu(),
+ 227:                 "fitness": engine.fitness.cpu(),
+ 228:                 "history_best": engine.brains.history_best_fitness,
+ 229:                 "history_avg": engine.brains.history_avg_fitness,
+ 230:             }
+ 231: 
+ 232:             torch.save(snapshot_data, filepath)
+ 233:             self.flush_spatial_parquet()
+ 234: 
+ 235:             with open(self.log_filepath, "a", encoding="utf-8") as f:
+ 236:                 log_entry = {
+ 237:                     "type": "SNAPSHOT_SAVED",
+ 238:                     "epoch": engine.current_epoch,
+ 239:                     "filepath": filepath,
+ 240:                     "filename": filename,
+ 241:                     "timestamp": datetime.now().isoformat(),
+ 242:                 }
+ 243:                 f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+ 244: 
+ 245:             return filepath
+ 246: 
+ 247:     def load_snapshot(self, engine, filepath: str) -> bool:
+ 248:         """Načte uložený snapshot a obnoví stav mozků, generálů i simulace (včetně zpětné kompatibility)."""
+ 249:         with engine._engine_lock:
+ 250:             if not os.path.exists(filepath):
+ 251:                 return False
+ 252: 
+ 253:             data = torch.load(filepath, map_location=engine.device, weights_only=False)
+ 254: 
+ 255:             engine.n_factions = data.get("n_factions", 4)
+ 256:             engine.budget_per_faction = data.get("budget_per_faction", 100)
+ 257:             engine.current_epoch = data.get("epoch", 1)
+ 258:             engine.epoch_wins_per_faction = data.get("wins_per_faction", [0, 0, 0, 0])
+ 259:             engine.faction_doctrines = data.get("faction_doctrines", [0, 0, 0, 0])
+ 260:             for f, d in enumerate(engine.faction_doctrines):
+
+=== UNUSED IMPORTS CHECK ===
+  launcher.py: [('datetime', 48)]
+  run_headless.py: [('datetime', 16), ('Path', 17), ('np', 36), ('scenarios', 38), ('ai_brains', 39)]
+  src/ai_brains.py: [('math', 1), ('CLASS_NAMES', 7), ('TECH_NANITES', 7), ('TECH_RADAR', 7), ('TECH_SHIELDS', 7), ('TECH_OVERCLOCK', 7), ('TECH_AEROSOL', 7)]
+  src/analyze_telemetry.py: [('sys', 10)]
+  src/engine/async_runner.py: [('Callable', 11)]
+  src/engine/ballistics_system.py: [('math', 24), ('np', 26)]
+  src/engine/objectives_system.py: [('math', 5)]
+  src/engine_core.py: [('time', 19), ('worker_prof', 23), ('SCENARIO_CHASM', 25)]
+  src/tactical_hud.py: [('FACTION_COLORS', 41), ('CLASS_GRUNT', 42), ('CLASS_SNIPER', 42), ('CLASS_JUGGERNAUT', 42), ('TECH_NAMES', 42), ('TECH_COSTS', 42)]
+  src/telemetry_lab.py: [('math', 25)]
+  tests/test_suite.py: [('np', 18), ('ai_brains', 29), ('scenarios', 30), ('telemetry_lab', 33)]
