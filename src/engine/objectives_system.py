@@ -150,3 +150,161 @@ class ObjectivesSystem:
                 return True, winner, f"VYPRŠENÍ OPERAČNÍHO ČASU ({int(max_duration)}s)"
 
             return False, -1, ""
+
+
+def run_post_commit_and_objectives(eng, ctx) -> None:
+    """
+    Fáze po atomickém commitu (_atomic_commit_pipeline):
+    - Zaměřovací lasery Sniperů (v visual_mode)
+    - Anti-kemping penalizace Sniperů
+    - Aktualizace částic výbuchů a kouře
+    - Plně vektorizované obsazování kontrolních uzlů a bodování na GPU
+    """
+    import math
+    from ai_brains import CLASS_GRUNT, CLASS_SNIPER
+
+    dt = ctx.dt
+    alive = ctx.alive
+    alive_idx = ctx.alive_idx
+    K = ctx.K
+    dist_enemy = ctx.dist_enemy
+    target_enemy = ctx.target_enemy
+
+    eng.last_target_enemy = target_enemy
+
+    # Zaměřovací lasery Sniperů – POUZE pokud mají přímou viditelnost a míří na cíl dopředu!
+    aiming_snipers = (
+        alive
+        & (eng.classes == CLASS_SNIPER)
+        & (dist_enemy <= eng.class_range)
+        & (dist_enemy > 10.0)
+        & eng.has_los_target
+    )
+    if not eng.visual_mode:
+        aiming_snipers = torch.zeros_like(aiming_snipers)
+    aim_idx = torch.where(aiming_snipers)[0]
+    if aim_idx.numel() > 0:
+        a_tar = target_enemy[aim_idx]
+        valid_tar_snipers = a_tar >= 0
+        if valid_tar_snipers.any():
+            s_valid = aim_idx[valid_tar_snipers]
+            t_valid = a_tar[valid_tar_snipers]
+            l_vec = eng.pos[t_valid] - eng.pos[s_valid]
+            l_ang = torch.atan2(l_vec[:, 1], l_vec[:, 0])
+            l_err = (l_ang - eng.heading[s_valid] + math.pi) % (2.0 * math.pi) - math.pi
+            facing = torch.abs(l_err) < math.radians(50)
+            if facing.any():
+                s_face = s_valid[facing]
+                t_face = t_valid[facing]
+                a_lim = min(s_face.numel(), 20)
+                a_sel = s_face[:a_lim]
+                a_tar_sel = t_face[:a_lim]
+                eng.sniper_lasers = torch.cat([eng.pos[a_sel], eng.pos[a_tar_sel]], dim=1)
+            else:
+                eng.sniper_lasers = torch.zeros((0, 4), dtype=torch.float32, device=eng.device)
+        else:
+            eng.sniper_lasers = torch.zeros((0, 4), dtype=torch.float32, device=eng.device)
+    else:
+        eng.sniper_lasers = torch.zeros((0, 4), dtype=torch.float32, device=eng.device)
+
+    # Sniper anti-kemping penalizace (pokud sniper stojí déle než 8s na místě, ztrácí fitness)
+    is_sniper = (eng.classes == CLASS_SNIPER) & alive
+    is_standing = torch.norm(eng.vel, dim=1) < 0.20
+    eng.sniper_camp_timer = torch.where(
+        is_sniper & is_standing, eng.sniper_camp_timer + dt, torch.zeros_like(eng.sniper_camp_timer)
+    )
+    camp_penalty = (eng.sniper_camp_timer > 8.0) & is_sniper
+    if camp_penalty.any():
+        eng.fitness[camp_penalty] -= 1.8 * dt
+
+    # Aktualizace částic výbuchů a kouře
+    alive_particles = []
+    for p in eng.particles:
+        p["x"] += p["vx"]
+        p["y"] += p["vy"]
+        p["vx"] *= 0.92
+        p["vy"] *= 0.92
+        p["life"] -= dt * 2.2
+        if p["life"] > 0:
+            alive_particles.append(p)
+    eng.particles = alive_particles
+
+    # Obsazování uzlů (plně vektorizovaně na GPU v matici (K, M) bez .item() ve smyčce)
+    if eng.nodes_gpu.shape[0] > 0 and (eng.tick_counter % 6 == 0) and K > 0:
+        p_alive = eng.pos[alive_idx]
+        t_alive = eng.teams[alive_idx].long()
+        step_scale = 6.0
+
+        # 1. Maticový výpočet přítomnosti jednotek v uzlech: tvar (K, M)
+        diff = p_alive.unsqueeze(1) - eng.nodes_gpu[:, :2].unsqueeze(0)   # (K, M, 2)
+        dists_sq = (diff * diff).sum(dim=-1)                              # (K, M)
+        radii_sq = eng.nodes_gpu[:, 2].unsqueeze(0) ** 2                  # (1, M)
+        in_node = dists_sq <= radii_sq                                    # (K, M) bool
+
+        # 2. Počty jednotek jednotlivých frakcí v každém uzlu: tvar (M, 4)
+        team_one_hot = torch.nn.functional.one_hot(t_alive, num_classes=4).to(torch.float32)
+        cnts = in_node.to(torch.float32).transpose(0, 1) @ team_one_hot   # (M, 4)
+
+        cnt_dom, dom_t = torch.max(cnts, dim=1)                           # (M,), (M,)
+        cnt_other = cnts.sum(dim=1) - cnt_dom                             # (M,)
+        has_majority = cnt_dom > cnt_other                                # (M,) bool
+
+        n_owner = eng.nodes_gpu[:, 3].long()                              # (M,)
+        n_cap = eng.nodes_gpu[:, 4].clone()                               # (M,)
+
+        # 3. Vektorový výpočet fitness pro obsazující jednotky (+250 % bonus pro CLASS_GRUNT)
+        is_grunt = eng.classes[alive_idx] == CLASS_GRUNT
+        bonus_mult = torch.where(is_grunt, 2.5, 1.0).unsqueeze(1)         # (K, 1)
+        is_cap_unit = in_node & has_majority.unsqueeze(0) & (t_alive.unsqueeze(1) == dom_t.unsqueeze(0))
+
+        same_owner = n_owner == dom_t                                     # (M,)
+        reinforcing = has_majority & same_owner & (n_cap < 1.0)           # (M,)
+        neutralizing = has_majority & (~same_owner)                       # (M,)
+
+        node_fit_rate = torch.where(
+            reinforcing,
+            0.45 * step_scale,
+            torch.where(neutralizing, 0.65 * step_scale, 0.0),
+        ).unsqueeze(0)                                                    # (1, M)
+
+        cap_fitness_gain = (is_cap_unit.to(torch.float32) * bonus_mult * node_fit_rate).sum(dim=1)
+        eng.fitness[alive_idx] += cap_fitness_gain
+
+        # 4. Aktualizace progresu obsazení (n_cap) a vlastníka (n_owner) na GPU
+        n_cap = torch.where(reinforcing, torch.clamp(n_cap + 0.04 * step_scale, max=1.0), n_cap)
+        n_cap = torch.where(neutralizing, n_cap - 0.05 * step_scale, n_cap)
+
+        captured_mask = neutralizing & (n_cap <= 0.0)                     # (M,) bool
+        n_owner = torch.where(captured_mask, dom_t, n_owner)
+        n_cap = torch.where(captured_mask, torch.full_like(n_cap, 0.12), n_cap)
+
+        eng.nodes_gpu[:, 3] = n_owner.to(torch.float32)
+        eng.nodes_gpu[:, 4] = n_cap
+
+        # 5. Zápis události do combat_events pouze ve vzácném tiku změny vlastníka
+        if captured_mask.any():
+            cap_indices = torch.where(captured_mask)[0].cpu().tolist()
+            dom_teams_cpu = dom_t[captured_mask].cpu().tolist()
+            sec_t = int(eng.operation_time_sec)
+            meta_names = ("ALPHA", "OMEGA", "SOLAR", "PHANTOM")
+            node_names = ("UZEL ALFA", "UZEL BRAVO", "UZEL CHARLIE", "UZEL DELTA")
+
+            for idx_node, d_team in zip(cap_indices, dom_teams_cpu):
+                if len(eng.combat_events) > 35:
+                    eng.combat_events.pop(0)
+                n_label = node_names[idx_node] if idx_node < 4 else f"UZEL #{idx_node + 1}"
+                eng.combat_events.append({
+                    "time": eng.operation_time_sec,
+                    "text": f"[{sec_t:02d}s] {meta_names[d_team]} obsadil {n_label}!",
+                    "team": d_team,
+                })
+
+        # 6. Pasivní bodování a obranná fitness bez CPU větvení (n_owner >= 0 a n_cap >= 0.7)
+        held_mask = (n_owner >= 0) & (n_cap >= 0.7)                       # (M,) bool
+        safe_owners = torch.clamp(n_owner, min=0)
+        pts_add = torch.where(held_mask, 0.08 * step_scale, 0.0).to(eng.node_control_points.dtype)
+        eng.node_control_points.index_add_(0, safe_owners, pts_add)
+
+        is_defending = in_node & held_mask.unsqueeze(0) & (t_alive.unsqueeze(1) == n_owner.unsqueeze(0))
+        def_nodes_count = is_defending.sum(dim=1).to(torch.float32)       # (K,)
+        eng.fitness[alive_idx] += def_nodes_count * (0.25 * step_scale)
