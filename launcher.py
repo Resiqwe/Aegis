@@ -545,6 +545,82 @@ class CyberTacticsLauncher:
     def _draw_modern_analytics(self, rect: pygame.Rect, state: dict):
         _draw_modern_analytics(self, rect, state)
 
+    def _on_refresh(self):
+        self.refresh_telemetry_data()
+        self.set_status("Data byla obnovena z disku.", ACCENT_CYAN)
+
+    def _on_toggle_fps(self):
+        self.target_fps_idx = (self.target_fps_idx + 1) % len(self.target_fps_presets)
+        target = self.target_fps_presets[self.target_fps_idx]
+        self.set_status(f"Cílová frekvence GUI přepnuta na {target if target > 0 else 'Bez omezení'} Hz.", ACCENT_AMBER)
+
+    def _on_mode_new(self):
+        self.start_from_snapshot = False
+        self.set_status("Vybrán režim: Čistá kampaň (nová evoluce).", ACCENT_GREEN)
+
+    def _on_mode_snap(self):
+        if not self.snapshots:
+            self.set_status("V archivu není žádný snapshot pro načtení!", ACCENT_ROSE)
+        else:
+            self.start_from_snapshot = True
+            snap_n = os.path.basename(self.snapshots[self.selected_snapshot_idx])
+            self.set_status(f"Vybrán režim: Ze snapshotu ({snap_n}).", ACCENT_CYAN)
+
+    def _on_run_lab(self):
+        lab = telemetry_lab.TelemetryLab(telemetry_dir=self.telemetry_dir)
+        if lab.epochs_data:
+            html = lab.generate_html_report()
+            if html and os.path.exists(html):
+                webbrowser.open(os.path.abspath(html))
+            self.set_status("AI Report otevřen v prohlížeči.", ACCENT_GREEN)
+        else:
+            self.set_status("Zatím není dostatek dat pro report.", ACCENT_AMBER)
+
+    def _on_select_scenario(self, scen_idx: int):
+        if self.sim_active:
+            self.set_status("Změna mapy není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+        else:
+            self.selected_scenario = scen_idx
+            self.engine.switch_scenario(self.selected_scenario)
+            self.set_status(f"Nastavena mapa: {scenarios.SCENARIO_NAMES[self.selected_scenario].split('(')[0].strip()}", ACCENT_CYAN)
+
+    def _on_select_units(self, u_idx: int):
+        if self.sim_active:
+            self.set_status("Změna počtu jednotek není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+        else:
+            self.selected_units_idx = u_idx
+            self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
+            self.set_status(f"Nastaven rozpočet operace: {self.budget_presets[self.selected_units_idx]} b. na frakci.", ACCENT_CYAN)
+
+    def _dispatch_button(self, key: str):
+        exact_handlers = {
+            "refresh": self._on_refresh,
+            "toggle_fps": self._on_toggle_fps,
+            "mode_new": self._on_mode_new,
+            "mode_snap": self._on_mode_snap,
+            "start_continuous": lambda: self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot),
+            "open_preview": self.open_live_preview,
+            "toggle_pause": self.toggle_sim_pause,
+            "stop_sim": lambda: self.stop_simulation(save=True),
+            "tab_radar": lambda: setattr(self, "view_mode", "RADAR"),
+            "tab_heatmap": lambda: setattr(self, "view_mode", "HEATMAP"),
+            "export_csv": self._handle_export_csv,
+            "run_lab": self._on_run_lab,
+            "clean_logs": self._handle_clean_logs,
+        }
+        handler = exact_handlers.get(key)
+        if handler is not None:
+            handler()
+            return
+        if key.startswith("scen_"):
+            self._on_select_scenario(int(key.split("_")[1]))
+        elif key.startswith("units_"):
+            self._on_select_units(int(key.split("_")[1]))
+        elif key.startswith("start_batch_"):
+            self.start_simulation(target_epochs=int(key.split("_")[2]), use_snapshot=self.start_from_snapshot)
+        elif key.startswith("sim_speed_"):
+            self.sim_speed_idx = int(key.split("_")[2])
+
     def handle_click(self, mx: int, my: int):
         try:
             for idx, r_rect in list(self.snapshot_rects):
@@ -557,67 +633,7 @@ class CyberTacticsLauncher:
 
             for key, rect in list(self.ui_buttons.items()):
                 if rect.collidepoint(mx, my):
-                    if key == "refresh":
-                        self.refresh_telemetry_data()
-                        self.set_status("Data byla obnovena z disku.", ACCENT_CYAN)
-                    elif key == "toggle_fps":
-                        self.target_fps_idx = (self.target_fps_idx + 1) % len(self.target_fps_presets)
-                        target = self.target_fps_presets[self.target_fps_idx]
-                        self.set_status(f"Cílová frekvence GUI přepnuta na {target if target > 0 else 'Bez omezení'} Hz.", ACCENT_AMBER)
-                    elif key.startswith("scen_"):
-                        if self.sim_active:
-                            self.set_status("Změna mapy není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
-                        else:
-                            self.selected_scenario = int(key.split("_")[1])
-                            self.engine.switch_scenario(self.selected_scenario)
-                            self.set_status(f"Nastavena mapa: {scenarios.SCENARIO_NAMES[self.selected_scenario].split('(')[0].strip()}", ACCENT_CYAN)
-                    elif key.startswith("units_"):
-                        if self.sim_active:
-                            self.set_status("Změna počtu jednotek není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
-                        else:
-                            self.selected_units_idx = int(key.split("_")[1])
-                            self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
-                            self.set_status(f"Nastaven rozpočet operace: {self.budget_presets[self.selected_units_idx]} b. na frakci.", ACCENT_CYAN)
-                    elif key == "mode_new":
-                        self.start_from_snapshot = False
-                        self.set_status("Vybrán režim: Čistá kampaň (nová evoluce).", ACCENT_GREEN)
-                    elif key == "mode_snap":
-                        if not self.snapshots:
-                            self.set_status("V archivu není žádný snapshot pro načtení!", ACCENT_ROSE)
-                        else:
-                            self.start_from_snapshot = True
-                            snap_n = os.path.basename(self.snapshots[self.selected_snapshot_idx])
-                            self.set_status(f"Vybrán režim: Ze snapshotu ({snap_n}).", ACCENT_CYAN)
-                    elif key == "start_continuous":
-                        self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot)
-                    elif key.startswith("start_batch_"):
-                        n_ep = int(key.split("_")[2])
-                        self.start_simulation(target_epochs=n_ep, use_snapshot=self.start_from_snapshot)
-                    elif key == "open_preview":
-                        self.open_live_preview()
-                    elif key == "toggle_pause":
-                        self.toggle_sim_pause()
-                    elif key == "stop_sim":
-                        self.stop_simulation(save=True)
-                    elif key.startswith("sim_speed_"):
-                        self.sim_speed_idx = int(key.split("_")[2])
-                    elif key == "tab_radar":
-                        self.view_mode = "RADAR"
-                    elif key == "tab_heatmap":
-                        self.view_mode = "HEATMAP"
-                    elif key == "export_csv":
-                        self._handle_export_csv()
-                    elif key == "run_lab":
-                        lab = telemetry_lab.TelemetryLab(telemetry_dir=self.telemetry_dir)
-                        if lab.epochs_data:
-                            html = lab.generate_html_report()
-                            if html and os.path.exists(html):
-                                webbrowser.open(os.path.abspath(html))
-                            self.set_status("AI Report otevřen v prohlížeči.", ACCENT_GREEN)
-                        else:
-                            self.set_status("Zatím není dostatek dat pro report.", ACCENT_AMBER)
-                    elif key == "clean_logs":
-                        self._handle_clean_logs()
+                    self._dispatch_button(key)
                     return
         except Exception as e:
             self.set_status(f"Chyba kliknutí: {e}", ACCENT_ROSE)

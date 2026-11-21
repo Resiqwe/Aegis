@@ -334,69 +334,88 @@ class OptimizedTacticalHUD:
                 return True
         return False
 
+    def _on_next_epoch(self):
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("force_evolve")
+        else:
+            self.engine.finish_operation_and_evolve()
+        self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
+
+    def _on_cycle_scenario(self):
+        next_scen = (self.engine.current_scenario_idx + 1) % 3
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("switch_scenario", next_scen)
+        else:
+            self.engine.switch_scenario(next_scen)
+        scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
+        self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
+
+    def _on_save_snap(self):
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("save_snapshot")
+            self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
+        else:
+            path = self.telemetry.save_snapshot(self.engine)
+            self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
+
+    def _on_load_snap(self):
+        snaps = self.telemetry.list_available_snapshots()
+        if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
+            self.show_banner(f"[NACIST] Načten model: {os.path.basename(snaps[0])}", 3.0)
+        else:
+            self.show_banner("[VAROVANI] Žádný snapshot k načtení nenalezen!", 3.0)
+
+    def _on_cycle_doctrine(self, f_id: int):
+        new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("set_doctrine", f_id, new_doc)
+        else:
+            self.engine.set_faction_doctrine(f_id, new_doc)
+        doc_name = DOCTRINE_LIST[new_doc]
+        doc_desc = {
+            "BALANCED": "Vyvážený taktický postup a obsazování",
+            "RUSH": "Agresivní útok na střed a rychlý střet",
+            "HOLD": "Obranná formace a držení klíčových pozic",
+            "SKIRMISH": "Průzkum, odstup a dálkové ostřelování",
+        }.get(doc_name, "")
+        f_name = FACTION_META[f_id]["name"]
+        self.show_banner(f"[DOKTRINA] {f_name}: Doktrína přepnuta na [{doc_name}] - {doc_desc}", 3.5)
+
     def _trigger_button(self, key: str):
         self._btn_flash[key] = time.perf_counter()
-        if key == "back_menu":
-            pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
-        elif key == "play_pause":
-            self.running = not self.running
-            self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0)
-        elif key == "next_epoch":
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("force_evolve")
-            else:
-                self.engine.finish_operation_and_evolve()
-            self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
-        elif key.startswith("speed_"):
+        exact_handlers = {
+            "back_menu": lambda: pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE)),
+            "play_pause": lambda: (
+                setattr(self, "running", not self.running),
+                self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0),
+            ),
+            "next_epoch": self._on_next_epoch,
+            "toggle_follow": lambda: (
+                setattr(self, "follow_selected", not self.follow_selected),
+                self.show_banner("Sledování kamery: " + ("ZAPNUTO [Kamera sleduje cíl]" if self.follow_selected else "VYPNUTO [Volná kamera]"), 2.0),
+            ),
+            "cycle_speed": lambda: (
+                setattr(self, "speed_idx", (self.speed_idx + 1) % len(self.speed_presets)),
+                self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0),
+            ),
+            "cycle_scenario": self._on_cycle_scenario,
+            "cycle_units": lambda: (
+                setattr(self, "unit_preset_idx", (self.unit_preset_idx + 1) % len(self.unit_presets)),
+                self.reboot_simulation(),
+                self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0),
+            ),
+            "save_snap": self._on_save_snap,
+            "load_snap": self._on_load_snap,
+        }
+        handler = exact_handlers.get(key)
+        if handler is not None:
+            handler()
+            return
+        if key.startswith("speed_"):
             self.speed_idx = int(key.split("_")[1])
             self.show_banner(f"[BLESK] Rychlost simulace nastavena: {self.speed_presets[self.speed_idx]:g}x", 2.0)
-        elif key == "toggle_follow":
-            self.follow_selected = not self.follow_selected
-            self.show_banner("Sledování kamery: " + ("ZAPNUTO [Kamera sleduje cíl]" if self.follow_selected else "VYPNUTO [Volná kamera]"), 2.0)
-        elif key == "cycle_speed":
-            self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
-            self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0)
-        elif key == "cycle_scenario":
-            next_scen = (self.engine.current_scenario_idx + 1) % 3
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("switch_scenario", next_scen)
-            else:
-                self.engine.switch_scenario(next_scen)
-            scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
-            self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
-        elif key == "cycle_units":
-            self.unit_preset_idx = (self.unit_preset_idx + 1) % len(self.unit_presets)
-            self.reboot_simulation()
-            self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0)
-        elif key == "save_snap":
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("save_snapshot")
-                self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
-            else:
-                path = self.telemetry.save_snapshot(self.engine)
-                self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
-        elif key == "load_snap":
-            snaps = self.telemetry.list_available_snapshots()
-            if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
-                self.show_banner(f"[NACIST] Načten model: {os.path.basename(snaps[0])}", 3.0)
-            else:
-                self.show_banner("[VAROVANI] Žádný snapshot k načtení nenalezen!", 3.0)
         elif key.startswith("doc_"):
-            f_id = int(key.split("_")[1])
-            new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("set_doctrine", f_id, new_doc)
-            else:
-                self.engine.set_faction_doctrine(f_id, new_doc)
-            doc_name = DOCTRINE_LIST[new_doc]
-            doc_desc = {
-                "BALANCED": "Vyvážený taktický postup a obsazování",
-                "RUSH": "Agresivní útok na střed a rychlý střet",
-                "HOLD": "Obranná formace a držení klíčových pozic",
-                "SKIRMISH": "Průzkum, odstup a dálkové ostřelování"
-            }.get(doc_name, "")
-            f_name = FACTION_META[f_id]['name']
-            self.show_banner(f"[DOKTRINA] {f_name}: Doktrína přepnuta na [{doc_name}] - {doc_desc}", 3.5)
+            self._on_cycle_doctrine(int(key.split("_")[1]))
 
     def draw_button(self, surf, key: str, rect: pygame.Rect, label: str, active: bool = False, accent=ACCENT_CYAN):
         _draw_hud_button(
