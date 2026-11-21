@@ -61,60 +61,13 @@ import telemetry_lab
 import hardware_telemetry
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
-
-# Barevná paleta - Sleek Modern Dark
-BG_VOID = (9, 11, 16)
-PANEL_SURFACE = (15, 19, 28)
-PANEL_ELEVATED = (20, 26, 38)
-CARD_BG = (17, 22, 33)
-BORDER_SUBTLE = (30, 40, 58)
-BORDER_FOCUS = (0, 240, 210)
-
-TEXT_HEAD = (242, 246, 252)
-TEXT_BODY = (185, 198, 218)
-TEXT_MUTED = (120, 136, 162)
-
-ACCENT_CYAN = (0, 240, 210)
-ACCENT_AMBER = (255, 195, 30)
-ACCENT_GREEN = (65, 235, 100)
-ACCENT_ROSE = (255, 55, 115)
-ACCENT_PURPLE = (175, 80, 250)
-
-FACTION_THEMES = [
-    {"name": "ALPHA VANGUARD", "short": "ALPHA", "color": ACCENT_CYAN, "bg": (0, 35, 32)},
-    {"name": "OMEGA SYNDICATE", "short": "OMEGA", "color": ACCENT_ROSE, "bg": (40, 10, 20)},
-    {"name": "SOLAR CORE", "short": "SOLAR", "color": ACCENT_AMBER, "bg": (38, 28, 5)},
-    {"name": "PHANTOM UNIT", "short": "PHANTOM", "color": ACCENT_PURPLE, "bg": (28, 12, 42)},
-]
-
-CLASS_COLORS = [(74, 144, 226), (65, 235, 100), (255, 195, 25), (231, 76, 60)]
-
-
-def safe_rgb(col, default=(200, 200, 200)) -> tuple[int, int, int]:
-    try:
-        return (
-            max(0, min(255, int(col[0]))),
-            max(0, min(255, int(col[1]))),
-            max(0, min(255, int(col[2]))),
-        )
-    except Exception:
-        return default
-
-
-class ModernTextCache:
-    """Blesková textová cache: eliminuje 95 % CPU overheadu z font.render v každém snímku."""
-    def __init__(self):
-        self._cache = {}
-
-    def render(self, font: pygame.font.Font, text: str, color: tuple, bold: bool = False) -> pygame.Surface:
-        key = (id(font), text, color)
-        surf = self._cache.get(key)
-        if surf is None:
-            surf = font.render(text, True, color)
-            if len(self._cache) > 2000:
-                self._cache.clear()
-            self._cache[key] = surf
-        return surf
+from src.ui.widgets import (
+    BG_VOID, PANEL_SURFACE, PANEL_ELEVATED, CARD_BG, BORDER_SUBTLE, BORDER_FOCUS,
+    TEXT_HEAD, TEXT_BODY, TEXT_MUTED,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_ROSE, ACCENT_PURPLE,
+    FACTION_THEMES, CLASS_COLORS,
+    safe_rgb, ModernTextCache, draw_card as _draw_card, draw_launcher_button as _draw_launcher_button,
+)
 
 
 class CyberTacticsLauncher:
@@ -415,45 +368,15 @@ class CyberTacticsLauncher:
             pygame.event.clear(pygame.MOUSEBUTTONDOWN)
 
     def draw_card(self, rect: pygame.Rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8):
-        pygame.draw.rect(self.screen, bg, rect, border_radius=radius)
-        if border:
-            pygame.draw.rect(self.screen, border, rect, width=1, border_radius=radius)
+        _draw_card(self.screen, rect, bg=bg, border=border, radius=radius)
 
     def draw_button(self, key: str, rect: pygame.Rect, title: str, subtitle: str = "",
                     active: bool = False, accent=ACCENT_CYAN, radius=6, disabled: bool = False):
-        self.ui_buttons[key] = rect
-        mx, my = pygame.mouse.get_pos()
-        hover = rect.collidepoint(mx, my) and not disabled
-
-        acc = safe_rgb(accent)
-        if disabled:
-            bg = (14, 18, 26)
-            border = (32, 40, 52)
-            text_col = (70, 85, 105)
-        elif active:
-            bg = (int(acc[0] * 0.18), int(acc[1] * 0.18), int(acc[2] * 0.18))
-            border = acc
-            text_col = acc
-        elif hover:
-            bg = PANEL_ELEVATED
-            border = (120, 160, 210)
-            text_col = TEXT_HEAD
-        else:
-            bg = CARD_BG
-            border = BORDER_SUBTLE
-            text_col = TEXT_BODY
-
-        pygame.draw.rect(self.screen, bg, rect, border_radius=radius)
-        pygame.draw.rect(self.screen, border, rect, width=1, border_radius=radius)
-
-        if subtitle:
-            t1 = self.text_cache.render(self.f_sub, title, text_col)
-            t2 = self.text_cache.render(self.f_tiny, subtitle, TEXT_MUTED)
-            self.screen.blit(t1, (rect.x + 12, rect.y + 6))
-            self.screen.blit(t2, (rect.x + 12, rect.y + 24))
-        else:
-            t1 = self.text_cache.render(self.f_sub, title, text_col)
-            self.screen.blit(t1, (rect.centerx - t1.get_width() // 2, rect.centery - t1.get_height() // 2))
+        _draw_launcher_button(
+            self.screen, self.ui_buttons, self.text_cache, self.f_sub, self.f_tiny,
+            key=key, rect=rect, title=title, subtitle=subtitle,
+            active=active, accent=accent, radius=radius, disabled=disabled,
+        )
 
     def render(self):
         W, H = self.screen.get_size()

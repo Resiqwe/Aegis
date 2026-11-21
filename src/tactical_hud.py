@@ -45,51 +45,11 @@ from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
 import battlefield_renderer as bf_render
 from src.profiler import render_prof
-
-FACTION_META = [
-    {"name": "ALPHA VANGUARD", "short": "ALPHA", "color": (0, 240, 210)},
-    {"name": "OMEGA SYNDICATE", "short": "OMEGA", "color": (255, 45, 115)},
-    {"name": "SOLAR CORE", "short": "SOLAR", "color": (255, 195, 25)},
-    {"name": "PHANTOM UNIT", "short": "PHANTOM", "color": (175, 80, 250)},
-]
-
-BG_DARK = (11, 14, 21)
-PANEL_BG = (16, 21, 31)
-PANEL_HEADER = (24, 32, 46)
-BORDER_COL = (42, 56, 80)
-ACCENT_CYAN = (0, 240, 210)
-ACCENT_AMBER = (255, 195, 25)
-ACCENT_GREEN = (65, 235, 100)
-ACCENT_PINK = (255, 45, 120)
-TEXT_MAIN = (235, 242, 250)
-TEXT_DIM = (145, 160, 185)
-
-
-def safe_rgb(col, default=(200, 200, 200)) -> tuple[int, int, int]:
-    try:
-        return (
-            max(0, min(255, int(col[0]))),
-            max(0, min(255, int(col[1]))),
-            max(0, min(255, int(col[2]))),
-        )
-    except Exception:
-        return default
-
-
-class ModernTextCache:
-    """Blesková textová cache pro HUD: eliminuje 95 % CPU zátěže z font.render."""
-    def __init__(self):
-        self._cache = {}
-
-    def render(self, font: pygame.font.Font, text: str, color: tuple) -> pygame.Surface:
-        key = (id(font), text, color)
-        surf = self._cache.get(key)
-        if surf is None:
-            surf = font.render(text, True, color)
-            if len(self._cache) > 2500:
-                self._cache.clear()
-            self._cache[key] = surf
-        return surf
+from src.ui.widgets import (
+    FACTION_META, BG_DARK, PANEL_BG, PANEL_HEADER, BORDER_COL,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_PINK, TEXT_MAIN, TEXT_DIM,
+    safe_rgb, ModernTextCache, draw_hud_button as _draw_hud_button,
+)
 
 
 class OptimizedTacticalHUD:
@@ -438,35 +398,10 @@ class OptimizedTacticalHUD:
             self.show_banner(f"[DOKTRINA] {f_name}: Doktrína přepnuta na [{doc_name}] - {doc_desc}", 3.5)
 
     def draw_button(self, surf, key: str, rect: pygame.Rect, label: str, active: bool = False, accent=ACCENT_CYAN):
-        self.ui_buttons[key] = rect
-        mx, my = pygame.mouse.get_pos()
-        hover = rect.collidepoint(mx, my)
-
-        acc = safe_rgb(accent)
-        # Efekt stisku tlačítka (flash 140 ms po kliknutí)
-        is_flash = (time.perf_counter() - self._btn_flash.get(key, 0.0)) < 0.14
-
-        if is_flash:
-            bg = (min(255, int(acc[0] * 0.55 + 50)), min(255, int(acc[1] * 0.55 + 50)), min(255, int(acc[2] * 0.55 + 50)))
-            border = (255, 255, 255)
-            txt_col = (255, 255, 255)
-        elif active:
-            bg = (int(acc[0] * 0.25), int(acc[1] * 0.25), int(acc[2] * 0.25))
-            border = acc
-            txt_col = acc
-        elif hover:
-            bg = (34, 46, 66)
-            border = (140, 180, 230)
-            txt_col = TEXT_MAIN
-        else:
-            bg = (18, 24, 34)
-            border = BORDER_COL
-            txt_col = TEXT_DIM
-
-        pygame.draw.rect(surf, bg, rect, border_radius=4)
-        pygame.draw.rect(surf, border, rect, width=1 if not (active or is_flash) else 2, border_radius=4)
-        txt = self.text_cache.render(self.f_small, label, txt_col)
-        surf.blit(txt, (rect.x + (rect.width - txt.get_width()) // 2, rect.y + (rect.height - txt.get_height()) // 2))
+        _draw_hud_button(
+            surf, self.ui_buttons, self._btn_flash, self.text_cache, self.f_small,
+            key=key, rect=rect, label=label, active=active, accent=accent,
+        )
 
     def render_battlefield(self, state: dict, unit_info: dict | None):
         vr = self.viewport_rect
