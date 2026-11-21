@@ -131,37 +131,49 @@ def run_profile(
         active_sec = None
         for line in lines:
             stripped = line.strip()
-            # Vstup do 1. sekce: sensors_and_ego
-            if stripped == "self.staging_buf.reset()":
-                out_lines.append("    _sec_ctx = _aegis_sec('sensors_and_ego'); _sec_ctx.__enter__()")
-                active_sec = "sensors_and_ego"
-            # Přechod na 2. sekci: movement_and_steering
-            elif stripped.startswith("squad_force = torch.zeros((N, 2)"):
+            if stripped == "run_sensors_and_brain(self, ctx)":
+                out_lines.append("    _sec_ctx = _aegis_sec('sensors_and_brain'); _sec_ctx.__enter__()")
+                active_sec = "sensors_and_brain"
+            elif stripped == "run_locomotion(self, ctx)":
                 if active_sec:
                     out_lines.append("    _sec_ctx.__exit__(None, None, None)")
-                out_lines.append("    _sec_ctx = _aegis_sec('movement_and_steering'); _sec_ctx.__enter__()")
-                active_sec = "movement_and_steering"
-            # Přechod na 3. sekci: targeting_and_weapons
-            elif stripped.startswith("utility = torch.zeros((N, 6)"):
+                out_lines.append("    _sec_ctx = _aegis_sec('locomotion'); _sec_ctx.__enter__()")
+                active_sec = "locomotion"
+            elif stripped == "run_weapons_and_firing(self, ctx)":
                 if active_sec:
                     out_lines.append("    _sec_ctx.__exit__(None, None, None)")
-                out_lines.append("    _sec_ctx = _aegis_sec('targeting_and_weapons'); _sec_ctx.__enter__()")
-                active_sec = "targeting_and_weapons"
-            # Konec 3. sekce před _atomic_commit_pipeline
+                out_lines.append("    _sec_ctx = _aegis_sec('weapons_and_firing'); _sec_ctx.__enter__()")
+                active_sec = "weapons_and_firing"
             elif stripped == "self._atomic_commit_pipeline(dt)":
                 if active_sec:
                     out_lines.append("    _sec_ctx.__exit__(None, None, None)")
                     active_sec = None
+            elif stripped == "run_post_commit_and_objectives(self, ctx)":
+                if active_sec:
+                    out_lines.append("    _sec_ctx.__exit__(None, None, None)")
+                out_lines.append("    _sec_ctx = _aegis_sec('post_commit_objectives'); _sec_ctx.__enter__()")
+                active_sec = "post_commit_objectives"
+            elif stripped == "self._update_gates(dt)":
+                if active_sec:
+                    out_lines.append("    _sec_ctx.__exit__(None, None, None)")
+                    active_sec = None
             out_lines.append(line)
+        if active_sec:
+            out_lines.append("    _sec_ctx.__exit__(None, None, None)")
         ns = dict(engine_core.__dict__)
         ns["_aegis_sec"] = _SectionTimer
         exec("\n".join(out_lines), ns)
         return types.MethodType(ns["_step_internal"], engine)
 
-    # Neinvazivní monkey-patch klíčových subsystémů + 3 sekcí _step_internal
+    # Neinvazivní monkey-patch klíčových subsystémů + sekcí _step_internal
+    import engine.sensors_system as sensors_system
+    import engine.spatial_system as spatial_system
+
     orig_step_internal = engine._step_internal
     orig_spatial_col = engine.spatial.resolve_obstacle_collisions
-    orig_los = engine_core.check_line_of_sight
+    orig_los = spatial_system.check_line_of_sight
+    orig_los_sensors = sensors_system.check_line_of_sight
+    orig_los_core = engine_core.check_line_of_sight
     orig_brains = engine.brains.forward
     orig_combat = engine.combat.process_abilities
     orig_ballistics = engine.ballistics.resolve_ballistic_hits
@@ -169,9 +181,12 @@ def run_profile(
     orig_status = engine.objectives.check_battle_status
     orig_commit = engine._atomic_commit_pipeline
 
+    wrapped_los = make_wrapper("spatial.check_line_of_sight", orig_los)
     engine._step_internal = _build_instrumented_step(engine_core.RealisticBattleEngine._step_internal)
     engine.spatial.resolve_obstacle_collisions = make_wrapper("spatial.resolve_obstacle_collisions", orig_spatial_col)
-    engine_core.check_line_of_sight = make_wrapper("spatial.check_line_of_sight", orig_los)
+    spatial_system.check_line_of_sight = wrapped_los
+    sensors_system.check_line_of_sight = wrapped_los
+    engine_core.check_line_of_sight = wrapped_los
     engine.brains.forward = make_wrapper("brains.forward", orig_brains)
     engine.combat.process_abilities = make_wrapper("combat.process_abilities", orig_combat)
     engine.ballistics.resolve_ballistic_hits = make_wrapper("ballistics.resolve_ballistic_hits", orig_ballistics)
@@ -200,7 +215,9 @@ def run_profile(
     finally:
         engine._step_internal = orig_step_internal
         engine.spatial.resolve_obstacle_collisions = orig_spatial_col
-        engine_core.check_line_of_sight = orig_los
+        spatial_system.check_line_of_sight = orig_los
+        sensors_system.check_line_of_sight = orig_los_sensors
+        engine_core.check_line_of_sight = orig_los_core
         engine.brains.forward = orig_brains
         engine.combat.process_abilities = orig_combat
         engine.ballistics.resolve_ballistic_hits = orig_ballistics
@@ -224,17 +241,18 @@ def run_profile(
     avg_wall_ms = total_wall_ms / max(1, ticks)
     avg_cpu_step_ms = total_cpu_step_ms / max(1, ticks)
     top_level_keys = (
-        "sensors_and_ego",
-        "movement_and_steering",
-        "targeting_and_weapons",
+        "sensors_and_brain",
+        "locomotion",
+        "weapons_and_firing",
         "_atomic_commit_pipeline",
+        "post_commit_objectives",
         "objectives.update_gates",
         "objectives.check_battle_status",
     )
     top_level_cpu_sum = sum(cpu_totals.get(k, 0.0) / max(1, ticks) for k in top_level_keys)
     uninstrumented_cpu_ms = max(0.0, avg_cpu_step_ms - top_level_cpu_sum)
 
-    section_names = {"sensors_and_ego", "movement_and_steering", "targeting_and_weapons"}
+    section_names = {"sensors_and_brain", "locomotion", "weapons_and_firing", "post_commit_objectives"}
     rows = [
         {
             "name": "uninstrumented_remainder (init/nodes/particles)",

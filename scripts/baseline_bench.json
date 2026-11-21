@@ -3,9 +3,9 @@
   "ticks": 500,
   "seed": 42,
   "device": "cuda:0",
-  "total_sec": 8.1895,
-  "ms_per_tick": 16.379,
-  "tps": 61.1,
+  "total_sec": 6.7657,
+  "ms_per_tick": 13.531,
+  "tps": 73.9,
   "contract_errors": [],
   "metrics": {
     "tick_counter": 515,
