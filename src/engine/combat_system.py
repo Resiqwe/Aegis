@@ -64,19 +64,19 @@ class CombatSystem:
         if not wants_ability.any():
             return ability_cooldown, active_smokes_gpu, fortress_shield_timer, sniper_focus_timer
 
-        # 3. Sniper: Focus Zaměření (vektorizovaně bez alokace full_like)
+        # 3. Sniper: Focus Zaměření (in-place zápis do eng.fitness bez přepsání lokální reference)
         sniper_mask = wants_ability & (classes == CLASS_SNIPER)
         if sniper_mask.any():
             ability_cooldown = torch.where(sniper_mask, 20.0, ability_cooldown)
             sniper_focus_timer = torch.where(sniper_mask, 5.0, sniper_focus_timer)
-            fitness = torch.where(sniper_mask, fitness + 2.0, fitness)
+            fitness[sniper_mask] += 2.0
 
-        # 4. Juggernaut: Fortress Shield (vektorizovaně bez alokace full_like)
+        # 4. Juggernaut: Fortress Shield (in-place zápis do eng.fitness bez přepsání lokální reference)
         jugg_mask = wants_ability & (classes == CLASS_JUGGERNAUT)
         if jugg_mask.any():
             ability_cooldown = torch.where(jugg_mask, 22.0, ability_cooldown)
             fortress_shield_timer = torch.where(jugg_mask, 6.0, fortress_shield_timer)
-            fitness = torch.where(jugg_mask, fitness + 2.5, fitness)
+            fitness[jugg_mask] += 2.5
 
         # 2. Medic: Bio-Pulz (plně vektorizovaně přes matici (M, N) bez Python smyčky)
         medic_mask = wants_ability & (classes == CLASS_MEDIC)

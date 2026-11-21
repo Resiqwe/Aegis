@@ -134,7 +134,9 @@ class TelemetryLab:
             self.latest_snapshot_path = snaps[0]
             try:
                 try:
-                    self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=True)
+                    from collections import deque
+                    with torch.serialization.safe_globals([deque]):
+                        self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=True)
                 except Exception as load_err:
                     print(f"[TelemetryLab] VAROVÁNÍ: weights_only=True selhalo ({load_err}), používám legacy fallback.")
                     self.snapshot_data = torch.load(self.latest_snapshot_path, map_location="cpu", weights_only=False)

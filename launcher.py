@@ -246,8 +246,9 @@ class CyberTacticsLauncher:
                 df = pd.read_parquet(pq_files[0])
                 self.total_spatial_events = len(df)
                 if len(df) > 0:
-                    xs = np.clip((df["x"].to_numpy() / 1600.0) * 36, 0, 35).astype(np.int32)
-                    ys = np.clip((df["y"].to_numpy() / 1000.0) * 22, 0, 21).astype(np.int32)
+                    from config import WORLD_W, WORLD_H
+                    xs = np.clip((df["x"].to_numpy() / float(WORLD_W)) * 36, 0, 35).astype(np.int32)
+                    ys = np.clip((df["y"].to_numpy() / float(WORLD_H)) * 22, 0, 21).astype(np.int32)
                     np.add.at(self.heatmap_grid, (ys, xs), 1)
             except Exception:
                 pass

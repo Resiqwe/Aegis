@@ -13,8 +13,10 @@ import torch
 
 
 def _load_pt_cpu(path: Path) -> dict[str, Any]:
+    from collections import deque
     try:
-        return torch.load(str(path), map_location="cpu", weights_only=True)
+        with torch.serialization.safe_globals([deque]):
+            return torch.load(str(path), map_location="cpu", weights_only=True)
     except Exception:
         return torch.load(str(path), map_location="cpu", weights_only=False)
 

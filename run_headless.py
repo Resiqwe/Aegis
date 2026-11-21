@@ -32,6 +32,12 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
 
 import torch
 
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.join(_PROJECT_ROOT, "src")
+for _p in (_SRC_DIR, _PROJECT_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import engine_core
 import telemetry_logger
 
@@ -53,7 +59,7 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
     # Smazání starých snapshotů .pt
     snaps = sorted(
         [f for f in os.listdir(telemetry_dir) if f.startswith("snapshot_") and f.endswith(".pt")],
-        key=lambda p: os.path.getmtime(p)
+        key=lambda p: os.path.getmtime(os.path.join(telemetry_dir, p))
     )
     while len(snaps) > max_snapshots:
         old_snap = snaps.pop(0)
@@ -66,7 +72,7 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
     # Smazání starých parquet souborů
     pq_files = sorted(
         [f for f in os.listdir(telemetry_dir) if f.startswith("spatial_events_") and f.endswith(".parquet")],
-        key=lambda p: os.path.getmtime(p)
+        key=lambda p: os.path.getmtime(os.path.join(telemetry_dir, p))
     )
     while len(pq_files) > max_parquet:
         old_pq = pq_files.pop(0)
@@ -152,13 +158,14 @@ def main():
                 w_team = rec.get("winner_team", -1)
                 w_name = ["ALPHA", "OMEGA", "SOLAR", "PHANTOM"][w_team] if 0 <= w_team < 4 else "REMIZA"
                 dur = rec.get("duration_ticks", 0) / 60.0
-                reason = rec.get("end_reason", "Vítězství")[:26]
+                reason = rec.get("end_reason", "Vítězství")
                 with engine._engine_lock:
                     lvls = "/".join(str(g.level) for g in engine.brains.generals)
 
                 print(
-                    f"   [Ep #{last_epoch:03d} -> #{engine.current_epoch:03d}] "
-                    f"Vítěz: {w_name:<7} | Čas: {dur:4.1f}s | Levely: [{lvls}] | {reason}"
+                    f"\r   [Ep #{last_epoch:03d} -> #{engine.current_epoch:03d}] "
+                    f"Vítěz: {w_name:<7} | Čas: {dur:4.1f}s | Levely: [{lvls}] | {reason}",
+                    flush=True,
                 )
                 last_epoch = engine.current_epoch
                 telemetry.flush_spatial_parquet()

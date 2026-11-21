@@ -123,18 +123,30 @@ class TelemetryManager:
             self.spatial_events.append(event)
 
     def flush_spatial_parquet(self) -> str | None:
-        """Zapíše dosud nasbírané prostorové události do Parquet souboru (thread-safe)."""
+        """Zapíše dosud nasbírané prostorové události do Parquet souboru bez přepsání předchozí historie (thread-safe)."""
         with self._spatial_lock:
             if not self.spatial_events:
                 return None
             events_to_write = self.spatial_events
             self.spatial_events = []
+        tmp_path = self.spatial_parquet_path + ".tmp"
         try:
             df = pd.DataFrame(events_to_write)
-            table = pa.Table.from_pandas(df)
-            pq.write_table(table, self.spatial_parquet_path, compression="snappy")
+            new_table = pa.Table.from_pandas(df, preserve_index=False)
+            if os.path.exists(self.spatial_parquet_path):
+                existing_table = pq.read_table(self.spatial_parquet_path)
+                table = pa.concat_tables([existing_table, new_table], promote_options="default")
+            else:
+                table = new_table
+            pq.write_table(table, tmp_path, compression="snappy")
+            os.replace(tmp_path, self.spatial_parquet_path)
             return self.spatial_parquet_path
         except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             with self._spatial_lock:
                 self.spatial_events = events_to_write + self.spatial_events
             return None
@@ -144,7 +156,7 @@ class TelemetryManager:
         return self.epochs_history
 
     def build_heatmap_grid(self, grid_w: int = 36, grid_h: int = 22,
-                           map_w: float = 1600.0, map_h: float = 1000.0) -> np.ndarray:
+                           map_w: float = 2400.0, map_h: float = 1350.0) -> np.ndarray:
         """Sestaví 2D heatmapu zabití z prostorových událostí držených v RAM."""
         grid = np.zeros((grid_h, grid_w), dtype=np.int32)
         with self._spatial_lock:
@@ -216,14 +228,8 @@ class TelemetryManager:
             filename = f"snapshot_{self.session_id}_epoch_{epoch:03d}{tag_part}.pt"
             filepath = os.path.join(self.output_dir, filename)
 
-            history_best_copy = [
-                deque(d, maxlen=getattr(d, "maxlen", 100))
-                for d in engine.brains.history_best_fitness
-            ]
-            history_avg_copy = [
-                deque(d, maxlen=getattr(d, "maxlen", 100))
-                for d in engine.brains.history_avg_fitness
-            ]
+            history_best_copy = [list(d) for d in engine.brains.history_best_fitness]
+            history_avg_copy = [list(d) for d in engine.brains.history_avg_fitness]
 
             snapshot_data = {
                 "session_id": self.session_id,
@@ -368,7 +374,8 @@ class TelemetryManager:
                 return False
 
             try:
-                data = torch.load(filepath, map_location=engine.device, weights_only=True)
+                with torch.serialization.safe_globals([deque]):
+                    data = torch.load(filepath, map_location=engine.device, weights_only=True)
             except Exception as load_err:
                 print(
                     f"[TelemetryManager] VAROVÁNÍ: weights_only=True selhalo pro {os.path.basename(filepath)} "
@@ -422,8 +429,10 @@ class TelemetryManager:
                         _copy_compatible_weights(engine.brains.W2[s_start:s_start + cnt], old_W2[f_idx[:cnt]])
                         _copy_compatible_weights(engine.brains.b2[s_start:s_start + cnt], old_b2[f_idx[:cnt]])
 
-            engine.brains.history_best_fitness = data.get("history_best", [[] for _ in range(4)])
-            engine.brains.history_avg_fitness = data.get("history_avg", [[] for _ in range(4)])
+            raw_best = data.get("history_best", [[] for _ in range(4)])
+            raw_avg = data.get("history_avg", [[] for _ in range(4)])
+            engine.brains.history_best_fitness = [deque(h, maxlen=100) for h in raw_best]
+            engine.brains.history_avg_fitness = [deque(h, maxlen=100) for h in raw_avg]
             engine.brains.epoch_number = engine.current_epoch
 
             scen_idx = data.get("scenario_idx", 0)
