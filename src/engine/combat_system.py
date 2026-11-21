@@ -148,3 +148,188 @@ class CombatSystem:
                 active_smokes_gpu = torch.cat([active_smokes_gpu, new_t], dim=0)
 
         return ability_cooldown, active_smokes_gpu, fortress_shield_timer, sniper_focus_timer
+
+
+def run_weapons_and_firing(eng, ctx) -> None:
+    """
+    Fáze zbraní a střelby před atomickým commitem (_atomic_commit_pipeline):
+    - Deterministický automat přebíjení
+    - Vyhodnocení spouště (Trigger > 0.58) a LoS ověření střelby
+    - Vektorová balistika (VectorizedBallisticsSystem) a Zero-Trust zápis delt do staging_buf
+    """
+    from engine.spatial_system import check_line_of_sight
+
+    DOCTRINE_HOLD = 2
+    alive = ctx.alive
+    alive_idx = ctx.alive_idx
+    K = ctx.K
+    dist_enemy = ctx.dist_enemy
+    target_enemy = ctx.target_enemy
+    p_alive = ctx.p_alive
+    brain_out = ctx.brain_out
+    has_combat_target = ctx.has_target
+    tar_diff = ctx.tar_diff
+
+    # DETERMINISTICKÝ AUTOMAT PŘEBÍJENÍ (Bez zbytečného zatěžování mozku přebíjením):
+    empty_mag = eng.ammo_in_mag <= 0
+    tactical_cover_reload = eng.in_cover & (eng.ammo_in_mag < eng.class_mag_size * 0.45) & (~has_combat_target)
+    start_reload = (
+        alive
+        & (empty_mag | tactical_cover_reload)
+        & (eng.reload_timer <= 0.0)
+        & (eng.ammo_in_mag < eng.class_mag_size)
+    )
+    eng.reload_timer = torch.where(start_reload, eng.CONST_RELOAD_TIME, eng.reload_timer)
+
+    # Střelba: Výstup 3 je Trigger (Sigmoid [0, 1] > 0.58)
+    eng.cooldown = (eng.cooldown - 1).clamp(min=0)
+
+    valid_tar = (target_enemy >= 0) & (target_enemy < eng.N)
+    # tar_diff už máme spočítaný ze stejných pozic a headingů výše -> 0 duplicitních atan2/nonzero!
+    on_target = alive & valid_tar & (torch.abs(tar_diff) < math.radians(45))
+
+    # Trigger je nyní čistý Sigmoid práh > 0.58 z výstupu 3
+    brain_trigger = brain_out[:, 3] > 0.58
+
+    can_fire = (
+        alive
+        & valid_tar
+        & eng.has_los_target
+        & on_target
+        & brain_trigger
+        & (eng.ammo_in_mag > 0)
+        & (eng.reload_timer <= 0.0)
+        & (eng.cooldown == 0)
+        & (dist_enemy <= eng.class_range)
+    )
+    shooters = torch.where(can_fire)[0]
+
+    eng.active_tracers_p1 = eng._empty_xy
+    eng.active_tracers_p2 = eng._empty_xy
+    eng.active_tracers_team = eng._empty_i8
+    eng.hit_sparks = eng._empty_xy
+    eng.armor_sparks = eng._empty_xy
+
+    if shooters.numel() > 0:
+        targets = target_enemy[shooters]
+        p_from = eng.pos[shooters]
+        p_to = eng.pos[targets]
+
+        los_ok = check_line_of_sight(p_from, p_to, eng.pillars_gpu, eng.walls_gpu, eng.active_smokes_gpu)
+        valid_s = shooters[los_ok]
+        valid_t = targets[los_ok]
+
+        if valid_s.numel() > 0:
+            eng.ammo_in_mag[valid_s] -= 1.0
+            s_classes = eng.classes[valid_s].long()
+            cd_val = eng.CONST_CLASS_COOLDOWNS[s_classes]
+            eng.cooldown[valid_s] = cd_val
+
+            fire_vec = eng.pos[valid_s] - eng.pos[valid_t]
+            fire_norm = torch.norm(fire_vec, dim=1, keepdim=True).clamp(min=1.0)
+            eng.incoming_fire_dir[valid_t] = fire_vec / fire_norm
+
+            # Přesnost podle třídy
+            base_acc = eng.CONST_CLASS_BASE_ACC[s_classes]
+            cover_mult = torch.where(s_classes == CLASS_SNIPER, 0.60, 0.48)
+            t_doc = eng.faction_doctrine_tensor[eng.teams[valid_t].long()]
+            hold_bonus = torch.where(t_doc == DOCTRINE_HOLD, 0.85, 1.0)
+
+            hit_prob = torch.where(eng.in_cover[valid_t], base_acc * cover_mult * hold_bonus, base_acc)
+            # Sniper Focus buff: +0.20 přesnost pro snipry s aktivním fokusem
+            sniper_focus_active = eng.sniper_focus_timer[valid_s] > 0.0
+            hit_prob = torch.where(sniper_focus_active, (hit_prob + 0.20).clamp(max=0.98), hit_prob)
+            hit_prob = hit_prob * (1.0 - eng.suppression[valid_s] * 0.45)
+
+            is_hit = torch.rand(valid_s.numel(), device=eng.device) < hit_prob
+
+            # ==============================================================
+            # AEGIS 2.0 VEKTOROVÁ BALISTIKA: Úhlový pancíř, Zónový rozpad & Kinetický Ragdoll
+            # ==============================================================
+            b_res = eng.ballistics.resolve_ballistic_hits(
+                valid_s=valid_s,
+                valid_t=valid_t,
+                is_hit=is_hit,
+                shooter_pos=eng.pos[valid_s],
+                target_pos=eng.pos[valid_t],
+                target_heading=eng.heading[valid_t],
+                shooter_classes=eng.classes[valid_s],
+                target_classes=eng.classes[valid_t],
+                target_in_cover=eng.in_cover[valid_t],
+                has_kinetic_shield=(
+                    eng.has_kinetic_shield
+                    if hasattr(eng, "has_kinetic_shield")
+                    else torch.zeros_like(eng.hp, dtype=torch.bool)
+                ),
+                base_dmg=eng.class_dmg[valid_s],
+                sniper_focus_active=eng.sniper_focus_timer[valid_s] > 0.0,
+                fortress_shield_active=eng.fortress_shield_timer[valid_t] > 0.0,
+            )
+
+            dmg = b_res["final_damage"]
+            # Prasknutí kinetických štítů při absorpci
+            if hasattr(eng, "has_kinetic_shield") and b_res["shield_absorbed"].any():
+                eng.has_kinetic_shield[valid_t[b_res["shield_absorbed"]]] = False
+
+            # Vizuální jiskry odraženého pancíře (Armor Sparks)
+            if eng.visual_mode and b_res["flank_hit"].any():
+                eng.armor_sparks = eng.pos[valid_t[b_res["flank_hit"]][:24]]
+
+            # ==============================================================
+            # ZERO-TRUST WRITE-ONLY BUFFER: Všechny impulzy a delty se ukládají zde!
+            # ==============================================================
+            # Kinetický impuls (Knockback)
+            kb_vectors = torch.stack([b_res["knockback_x"], b_res["knockback_y"]], dim=1)
+            eng.staging_buf.delta_vel.index_add_(0, valid_t, kb_vectors)
+
+            # Poškození (záporné HP) a statistiky zásahu
+            eng.staging_buf.delta_hp.index_add_(0, valid_t, -dmg)
+            eng.staging_buf.damage_taken.index_add_(0, valid_t, dmg)
+
+            # Záznam střelce pro přesnou atribuci killů
+            if is_hit.any():
+                hit_t = valid_t[is_hit]
+                hit_s = valid_s[is_hit]
+                eng.staging_buf.last_attacker_id[hit_t] = hit_s
+
+            # Suppression yield
+            eng.staging_buf.delta_suppression.index_add_(0, valid_t, b_res["suppression_yield"])
+
+            # Motoric Stagger duration (zapíše se nejvyšší hodnota trvání)
+            if b_res["stagger_mask"].any():
+                stagg_idx = valid_t[b_res["stagger_mask"]]
+                stagg_dur = b_res["stagger_duration"][b_res["stagger_mask"]]
+                eng.staging_buf.stagger_duration[stagg_idx] = torch.maximum(
+                    eng.staging_buf.stagger_duration[stagg_idx], stagg_dur
+                )
+
+            # Pud sebezáchovy: penalizace za poškození utržené mimo kryt
+            out_of_cover_hit = is_hit & (~eng.in_cover[valid_t])
+            if out_of_cover_hit.any():
+                pen_targets = valid_t[out_of_cover_hit]
+                pen_dmg = (dmg * 0.22)[out_of_cover_hit]
+                eng.staging_buf.out_of_cover_penalty.index_add_(0, pen_targets, pen_dmg)
+
+            # Near-miss suppression pro jednotky v okolí zásahu
+            if K > 1 and valid_t.numel() > 0:
+                d_to_targets = torch.cdist(p_alive, eng.pos[valid_t])
+                near_miss = (d_to_targets < 65.0).any(dim=1)
+                if near_miss.any():
+                    supp_targets = alive_idx[near_miss]
+                    supp_vals = torch.full((supp_targets.numel(),), 0.10, device=eng.device)
+                    eng.staging_buf.delta_suppression.index_add_(0, supp_targets, supp_vals)
+
+            eng.damage_dealt[valid_s] += dmg
+            eng.fitness[valid_s] += dmg * 0.65
+
+            if eng.visual_mode:
+                s_lim = min(valid_s.numel(), 64)
+                eng.active_tracers_p1 = eng.pos[valid_s[:s_lim]]
+                eng.active_tracers_p2 = eng.pos[valid_t[:s_lim]]
+                eng.active_tracers_team = eng.teams[valid_s[:s_lim]]
+                if is_hit.any():
+                    eng.hit_sparks = eng.pos[valid_t[is_hit][:32]]
+                    is_target_jugg = eng.classes[valid_t].long() == CLASS_JUGGERNAUT
+                    jugg_hits = is_hit & is_target_jugg
+                    if jugg_hits.any():
+                        eng.armor_sparks = eng.pos[valid_t[jugg_hits][:24]]
