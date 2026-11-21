@@ -23,6 +23,7 @@ import torch
 from config import CLASS_NAMES
 from scenarios import MapScenario, compute_cpu_flow_field, SCENARIO_DOMINATION, SCENARIO_CITADEL, SCENARIO_NAMES
 from engine.staging_buffer import SimulationStagingBuffer
+from engine.tick_context import TickContext
 from engine.spatial_system import SpatialSystem, check_line_of_sight
 from engine.ballistics_system import VectorizedBallisticsSystem
 from engine.combat_system import CombatSystem
@@ -516,6 +517,7 @@ class RealisticBattleEngine:
 
         alive_idx = torch.where(alive)[0]
         K = alive_idx.numel()
+        ctx = TickContext(dt=dt, N=N, alive=alive, alive_idx=alive_idx, K=K)
 
         # Reset Zero-Trust Staging Bufferu na začátku ticku
         self.staging_buf.reset()
