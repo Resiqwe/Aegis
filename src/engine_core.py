@@ -25,6 +25,7 @@ from scenarios import MapScenario, compute_cpu_flow_field, SCENARIO_DOMINATION, 
 from engine.staging_buffer import SimulationStagingBuffer
 from engine.tick_context import TickContext
 from engine.sensors_system import run_sensors_and_brain
+from engine.locomotion_system import run_locomotion
 from engine.spatial_system import SpatialSystem, check_line_of_sight
 from engine.ballistics_system import VectorizedBallisticsSystem
 from engine.combat_system import CombatSystem
@@ -540,6 +541,7 @@ class RealisticBattleEngine:
         g_x = (self.pos[:, 0].long() // self.CELL_SIZE).clamp(0, self.GW - 1)
         g_y = (self.pos[:, 1].long() // self.CELL_SIZE).clamp(0, self.GH - 1)
         wall_force = self.flow_field_gpu[g_y, g_x]
+        ctx.wall_force = wall_force
         self.in_cover = torch.norm(wall_force, dim=1) > 0.38
 
         # Taktická odměna za setrvání v krytu pod palbou
@@ -548,194 +550,17 @@ class RealisticBattleEngine:
 
         # Fáze 1: Detekce nepřátel/spojenců, léčení Medika, egocentrické senzory a forward mozku
         run_sensors_and_brain(self, ctx)
+
+        # Fáze 2: Pohyb, rotace, třídní schopnosti, stavový registr a FOV ztráta cíle
+        run_locomotion(self, ctx)
         dir_enemy = ctx.dir_enemy
         dist_enemy = ctx.dist_enemy
         target_enemy = ctx.target_enemy
-        medic_has_patient = ctx.medic_has_patient
         p_alive = ctx.p_alive
         t_alive = ctx.t_alive
-        dist_mat = ctx.dist_mat
-        diff_all = ctx.diff_all
-        same_team = ctx.same_team
-        cos_th = ctx.cos_th
-        sin_th = ctx.sin_th
         brain_out = ctx.brain_out
-
-        # ==============================================================
-        # REÁLNÉ POHYBOVÉ ŘÍZENÍ Z AKCÍ MOZKU (Žádné skriptové berličky)
-        # Integrace pohybu probíhá PŘED generováním vizuálních stop, aby
-        # tracers/lasery vždy vycházely z aktuální pozice vojáka.
-        # ==============================================================
-        squad_force = torch.zeros((N, 2), dtype=torch.float32, device=self.device)
-        if K > 1:
-            ally_mask = same_team & (dist_mat > 12.0) & (dist_mat < 145.0)
-            ally_weights = torch.where(ally_mask, 1.0 / dist_mat.clamp(min=12.0), torch.zeros_like(dist_mat))
-            weight_sum = ally_weights.sum(dim=1, keepdim=True).clamp(min=1e-5)
-            squad_diff = torch.bmm(ally_weights.unsqueeze(1), diff_all).squeeze(1) / weight_sum
-            squad_force[alive_idx] = -squad_diff * 0.35
-
-        # ==============================================================
-        # 7 Tenzorových Výstupů Mozku:
-        # 0: Surge, 1: Sway, 2: Yaw, 3: Trigger, 4: Stance, 5: Ability, 6: Ping
-        # ==============================================================
-        brain_surge  = brain_out[:, 0]  # +1 vpřed, -1 plná zpátečka / couvání
-        brain_sway   = brain_out[:, 1]  # +1 vpravo, -1 vlevo
-        brain_yaw    = brain_out[:, 2]  # rotace těla nezávisle na směru pohybu
-        brain_stance = brain_out[:, 4]  # +1 Sprint (+30% rychlost, horší kryt), -1 Plížení (poloviční rychlost, max kryt)
-        brain_ability= brain_out[:, 5]  # > 0.60 spouští aktivní třídní schopnost
-        brain_ping   = brain_out[:, 6]  # taktický signál vysílaný spojencům v četě
-    
-        # Aktualizace komunikačního kanálu čety
-        self.squad_ping = torch.lerp(self.squad_ping, brain_ping * alive.float(), 0.35)
-
-        # Vyhodnocení třídních schopností (Akce 5: Ability) přes CombatSystem
-        (
-            self.ability_cooldown,
-            self.active_smokes_gpu,
-            self.fortress_shield_timer,
-            self.sniper_focus_timer,
-        ) = self.combat.process_abilities(
-            dt=dt,
-            brain_ability=brain_ability,
-            alive=alive,
-            classes=self.classes,
-            teams=self.teams,
-            pos=self.pos,
-            hp=self.hp,
-            class_max_hp=self.class_max_hp,
-            ability_cooldown=self.ability_cooldown,
-            active_smokes_gpu=self.active_smokes_gpu,
-            fortress_shield_timer=self.fortress_shield_timer,
-            sniper_focus_timer=self.sniper_focus_timer,
-            staging_buf=self.staging_buf,
-            healing_done=self.healing_done,
-            fitness=self.fitness,
-            active_heals_p1=[],
-            active_heals_p2=[],
-            faction_techs=self.faction_active_techs,
-            visual_mode=self.visual_mode,
-            particles=self.particles,
-        )
-
-        # Holonomická transformace tělesného vektoru (Surge & Sway) do globálních souřadnic
-        # Agent se může pohybovat libovolným směrem v 360° a zároveň mířit jinam!
-        brain_mv_x = brain_surge * cos_th + brain_sway * (-sin_th)
-        brain_mv_y = brain_surge * sin_th + brain_sway * cos_th
-        brain_world_vec = torch.stack([brain_mv_x, brain_mv_y], dim=1)
-
-        # Spojení tahu s odpudivostí překážek a kohezí
-        move_raw = brain_world_vec * 1.35 + squad_force * 0.18 + wall_force * 1.60
-
-        # Odpočet Stagger timeru (ochrnutí hybnosti po těžkém zásahu)
-        self.stagger_timer = (self.stagger_timer - dt).clamp(min=0.0)
-        is_staggered = self.stagger_timer > 0.0
-
-        # ==============================================================
-        # MATICOVÝ STAVOVÝ REGISTR (ArgMax State Selector)
-        # Tenzorové vyhodnocení stavů bez vnořených větví if/else
-        # Stavy: 0: IDLE, 1: ENGAGE, 2: COVER_RETREAT, 3: SNIPER_LOCK, 4: TRIAGE_HEAL, 5: FORTRESS_PUSH
-        # ==============================================================
-        utility = torch.zeros((N, 6), dtype=torch.float32, device=self.device)
-        u_classes = self.classes.long()
-
-        # Stav 0: IDLE (výchozí základní váha)
-        utility[:, STATE_IDLE] = 0.50
-
-        # Stav 1: ENGAGE (čelní cíl v dosahu, nízké potlačení)
-        has_combat_target = (dist_enemy <= self.class_range * 1.35) & self.has_los_target & (target_enemy >= 0) & alive
-        enemy_ang = torch.atan2(dir_enemy[:, 1], dir_enemy[:, 0])
-        aim_diff = (enemy_ang - self.heading + math.pi) % (2.0 * math.pi) - math.pi
-        engage_utility = torch.where(
-            has_combat_target & (torch.abs(aim_diff) < math.radians(45)),
-            1.20 + (1.0 - self.suppression) * 0.80,
-            0.0,
-        )
-        utility[:, STATE_ENGAGE] = engage_utility
-
-        # Stav 2: COVER_RETREAT (těžké potlačení nebo poškození mimo kryt -> pud sebezáchovy)
-        retreat_utility = torch.where(
-            (~self.in_cover) & ((self.suppression > 0.40) | (self.hp < self.class_max_hp * 0.35)),
-            1.60 + self.suppression * 0.90,
-            0.0,
-        )
-        utility[:, STATE_COVER_RETREAT] = retreat_utility
-
-        # Stav 3: SNIPER_LOCK (Sniper s čistým LoS raycastem zastavuje pohyb a fixuje zbraň)
-        is_sniper_cls = u_classes == CLASS_SNIPER
-        sniper_lock_utility = torch.where(
-            is_sniper_cls & has_combat_target & (self.ammo_in_mag > 0),
-            2.80,
-            0.0,
-        )
-        utility[:, STATE_SNIPER_LOCK] = sniper_lock_utility
-
-        # Stav 4: TRIAGE_HEAL (Medik s pacientem v dosahu ignoruje útok)
-        is_medic_cls = u_classes == CLASS_MEDIC
-        medic_heal_utility = torch.where(
-            is_medic_cls & medic_has_patient,
-            3.00,
-            0.0,
-        )
-        utility[:, STATE_TRIAGE_HEAL] = medic_heal_utility
-
-        # Stav 5: FORTRESS_PUSH (Juggernaut neustupuje, ignoruje lehký stagger a tlačí frontu)
-        is_jugg_cls = u_classes == CLASS_JUGGERNAUT
-        jugg_push_utility = torch.where(
-            is_jugg_cls & alive,
-            1.90,
-            0.0,
-        )
-        utility[:, STATE_FORTRESS_PUSH] = jugg_push_utility
-
-        # Čistý tenzorový ArgMax výběr stavu jednotky (pouze pro telemetrickou diagnostiku v HUDu, bez override pohybu/záměru):
-        self.unit_state = torch.argmax(utility, dim=1).int()
-
-        # Zero-Script AI: Pohyb je plně řízen výstupem neuronové sítě (Surge, Sway, Stance)
-        # s přihlédnutím k fyzikálnímu odpuzování od stěn a kohezi formace.
-        effective_move_raw = move_raw
-
-        u_doc = self.faction_doctrine_tensor[self.teams.long()]
-        doc_speed_mod = torch.where(u_doc == DOCTRINE_RUSH, 1.12, torch.where(u_doc == DOCTRINE_HOLD, 0.90, 1.0))
-        # Stance modifikátor rychlosti: +1.0 = Sprint (1.30x), -1.0 = Plížení (0.55x)
-        stance_speed_mod = torch.where(brain_stance > 0.3, 1.30, torch.where(brain_stance < -0.3, 0.55, 1.0))
-        speed_mult = torch.where(is_staggered, torch.full_like(doc_speed_mod, 0.15), (1.0 - self.suppression * 0.40) * doc_speed_mod * stance_speed_mod)
-
-        v_norm = torch.norm(effective_move_raw, dim=1, keepdim=True).clamp(min=1.0)
-        desired_vel = (effective_move_raw / v_norm) * speed_mult.unsqueeze(1) * self.class_speed.unsqueeze(1)
-
-        self.vel = torch.lerp(self.vel, desired_vel, 0.26) * alive.unsqueeze(1).float()
-        self.pos += self.vel
-
-        self.pos, self.vel = self.spatial.resolve_obstacle_collisions(self.pos, self.vel, self.walls_gpu, self.pillars_gpu, 10.0)
-        self.pos[:, 0].clamp_(25.0, self.W - 25.0)
-        self.pos[:, 1].clamp_(25.0, self.H - 25.0)
-
-        # Nezávislé otáčení těla a zaměřování (Yaw):
-        # Rotace je řízena mozkem (brain_yaw). V boji s přímou viditelností poskytuje jemnou taktickou asistenci.
-        omega = torch.where(has_combat_target, aim_diff * 0.45 + brain_yaw * 0.20, brain_yaw * 0.45)
-        self.heading = (self.heading + omega * alive.float() + math.pi) % (2.0 * math.pi) - math.pi
-
-        # ANTI-KÁČA FITNESS PENALIZACE ZA ZBYTEČNOU ÚHLOVOU KINETIKU:
-        # Pokud se agent bezcílně točí na místě bez lineárního pohybu, okamžitě padá jeho fitness!
-        lin_speed = torch.norm(self.vel, dim=1)
-        spin_penalty = torch.where((lin_speed < 0.20) & (~has_combat_target) & alive, omega.abs() * 0.18, torch.zeros_like(omega))
-        self.fitness -= spin_penalty
-
-        # Okamžitá ztráta zaměření cíle mimo FOV kužel (100 % bezvětveně na GPU bez .any()/nonzero)
-        has_tar = (target_enemy >= 0) & (target_enemy < self.N) & alive
-        tar_safe = target_enemy.clamp(0, max(0, N - 1))
-        tar_v = self.pos[tar_safe] - self.pos
-        tar_d = torch.norm(tar_v, dim=1)
-        tar_a = torch.atan2(tar_v[:, 1], tar_v[:, 0])
-        tar_diff = (tar_a - self.heading + math.pi) % (2.0 * math.pi) - math.pi
-        lost_fov = has_tar & (tar_d > 75.0) & (torch.abs(tar_diff) >= (math.radians(140) * 0.5))
-
-        target_enemy = torch.where(lost_fov, -1, target_enemy)
-        dist_enemy = torch.where(lost_fov, 9999.0, dist_enemy)
-        dir_enemy = torch.where(lost_fov.unsqueeze(1), 0.0, dir_enemy)
-        self.has_los_target = self.has_los_target & (~lost_fov)
-
-        self.last_target_enemy = target_enemy
+        has_combat_target = ctx.has_target
+        tar_diff = ctx.tar_diff
 
         # DETERMINISTICKÝ AUTOMAT PŘEBÍJENÍ (Bez zbytečného zatěžování mozku přebíjením):
         empty_mag = self.ammo_in_mag <= 0
