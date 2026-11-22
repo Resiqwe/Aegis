@@ -1,0 +1,205 @@
+diff --git a/scripts/aegis_tool.py b/scripts/aegis_tool.py
+index 5a80eaf..441daed 100644
+--- a/scripts/aegis_tool.py
++++ b/scripts/aegis_tool.py
+@@ -28,8 +28,9 @@ from tools.perf_runner import run_profile, run_bench
+ from tools.snap_inspector import list_snapshots, inspect_snapshot, diff_snapshots
+ 
+ 
+-def _run_health(root: Path) -> int:
+-    print("=== [1/4] PY_COMPILE ===")
++def _run_health(root: Path, fast: bool = False) -> int:
++    total_steps = 4 if fast else 5
++    print(f"=== [1/{total_steps}] PY_COMPILE ===")
+     py_files = [str(p) for _, p in _iter_active_py_files(root)]
+     comp = subprocess.run([sys.executable, "-m", "py_compile", *py_files], cwd=str(root))
+     if comp.returncode != 0:
+@@ -37,19 +38,27 @@ def _run_health(root: Path) -> int:
+         return 1
+     print(f"  OK ({len(py_files)} souborů)")
+ 
+-    print("\n=== [2/4] XRAY --STRICT ===")
++    print(f"\n=== [2/{total_steps}] XRAY --STRICT ===")
+     xr_code = run_xray(root, compact=True, strict=True)
+     if xr_code != 0:
+         print("[HEALTH FAIL] xray --strict nalezl F401 nebo zakázaný GPU sync v core hot-loopu.")
+         return 1
+ 
+-    print("\n=== [3/4] TEST SUITE (tests/test_suite.py) ===")
++    print(f"\n=== [3/{total_steps}] TEST SUITE (tests/test_suite.py) ===")
+     t_proc = subprocess.run([sys.executable, str(root / "tests" / "test_suite.py"), "-v"], cwd=str(root))
+     if t_proc.returncode != 0:
+         print("[HEALTH FAIL] test_suite.py selhal.")
+         return 1
+ 
+-    print("\n=== [4/4] GIT STATUS ===")
++    if not fast:
++        print(f"\n=== [4/{total_steps}] GOLDEN MASTER (tests/test_golden_master.py) ===")
++        gm_proc = subprocess.run([sys.executable, "-m", "pytest", str(root / "tests" / "test_golden_master.py"), "-v"], cwd=str(root))
++        if gm_proc.returncode != 0:
++            print("[HEALTH FAIL] test_golden_master.py selhal.")
++            return 1
++
++    git_step = f"[{total_steps}/{total_steps}]"
++    print(f"\n=== {git_step} GIT STATUS ===")
+     g_proc = subprocess.run(["git", "status", "--short"], cwd=str(root), capture_output=True, text=True)
+     out = (g_proc.stdout or "").strip()
+     print(out if out else "  (čistý pracovní strom)")
+@@ -58,6 +67,31 @@ def _run_health(root: Path) -> int:
+     return 0
+ 
+ 
++def _run_git_diff(root: Path, name: str) -> int:
++    """Spustí git diff, uloží výstup do plany/<name>.diff a do konzole vypíše pouze git diff --stat."""
++    plany_dir = root / "plany"
++    plany_dir.mkdir(parents=True, exist_ok=True)
++    clean_name = name if name.endswith(".diff") else f"{name}.diff"
++    diff_file = plany_dir / clean_name
++
++    diff_proc = subprocess.run(["git", "diff"], cwd=str(root), capture_output=True, text=True)
++    if diff_proc.returncode != 0:
++        err = diff_proc.stderr.strip()
++        print(f"[!] Chyba při spouštění git diff: {err}")
++        return diff_proc.returncode
++
++    diff_file.write_text(diff_proc.stdout, encoding="utf-8")
++    print(f"[AEGIS DIFF] Diff uložen do: {diff_file.as_posix()}")
++
++    stat_proc = subprocess.run(["git", "diff", "--stat"], cwd=str(root), capture_output=True, text=True)
++    out = (stat_proc.stdout or "").strip()
++    if out:
++        print(out)
++    else:
++        print("  (žádné změny v pracovní kopii)")
++    return 0
++
++
+ def main() -> int:
+     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+         try:
+@@ -79,6 +113,7 @@ def main() -> int:
+     # xray
+     p_xray = sub.add_parser("xray", help="Statický AST rentgen kódu")
+     p_xray.add_argument("--compact", action="store_true", help="Kompaktní výstup pro LLM")
++    p_xray.add_argument("--show-silent", action="store_true", help="Zobrazí seznam tichých exceptů")
+     p_xray.add_argument("--json", action="store_true", help="JSON výstup")
+     p_xray.add_argument("--deps", type=str, default=None, help="Mapa READS/WRITES atributů pro zadanou třídu")
+     p_xray.add_argument("--strict", action="store_true", help="Exit code 1 při F401 nebo core hot-loop GPU syncu")
+@@ -121,8 +156,13 @@ def main() -> int:
+     # probe (delegováno výše před parse_args, zde pro zobrazení v --help)
+     sub.add_parser("probe", add_help=False, help="Neinvazivní per-process HW sonda (deleguje na devtools/hw_probe.py)")
+ 
++    # diff
++    p_diff = sub.add_parser("diff", help="Uloží git diff do plany/<name>.diff a vypíše kompaktní stat")
++    p_diff.add_argument("name", type=str, help="Název výstupního souboru diffu (např. tooling_upgrade)")
++
+     # health
+-    sub.add_parser("health", help="Kompletní pre-commit gate (py_compile + xray + tests + git)")
++    p_health = sub.add_parser("health", help="Kompletní pre-commit gate (py_compile + xray + tests + golden_master + git)")
++    p_health.add_argument("--fast", action="store_true", help="Přeskočí test_golden_master.py pro bleskovou kontrolu")
+ 
+     args = parser.parse_args()
+ 
+@@ -134,6 +174,7 @@ def main() -> int:
+             deps_class=args.deps,
+             strict=args.strict,
+             strict_all=args.strict_all,
++            show_silent=args.show_silent,
+         )
+     if args.cmd == "profile":
+         return run_profile(
+@@ -162,8 +203,10 @@ def main() -> int:
+             return inspect_snapshot(args.path, as_json=args.json)
+         if args.snaps_cmd == "diff":
+             return diff_snapshots(args.path_a, args.path_b, as_json=args.json)
++    if args.cmd == "diff":
++        return _run_git_diff(ROOT, args.name)
+     if args.cmd == "health":
+-        return _run_health(ROOT)
++        return _run_health(ROOT, fast=args.fast)
+     return 0
+ 
+ 
+diff --git a/scripts/baseline_bench.json b/scripts/baseline_bench.json
+index a474710..1b2b29f 100644
+--- a/scripts/baseline_bench.json
++++ b/scripts/baseline_bench.json
+@@ -3,9 +3,9 @@
+   "ticks": 500,
+   "seed": 42,
+   "device": "cuda:0",
+-  "total_sec": 6.7657,
+-  "ms_per_tick": 13.531,
+-  "tps": 73.9,
++  "total_sec": 6.8882,
++  "ms_per_tick": 13.776,
++  "tps": 72.6,
+   "contract_errors": [],
+   "metrics": {
+     "tick_counter": 515,
+diff --git a/scripts/tools/xray.py b/scripts/tools/xray.py
+index 56a42fd..8a77dfe 100644
+--- a/scripts/tools/xray.py
++++ b/scripts/tools/xray.py
+@@ -23,6 +23,21 @@ EXCLUDED_PARTS = {"archive", ".venv", "venv", "__pycache__", ".idea", ".git", "s
+ GPU_SYNC_ATTRS = {"item", "cpu", "numpy", "tolist", "any", "all"}
+ HOT_PATH_PREFIXES = ("src/engine_core.py", "src/engine/")
+ 
++CORE_HOT_LOOP_FILES = {
++    "src/engine_core.py",
++    "src/engine/sensors_system.py",
++    "src/engine/combat_system.py",
++    "src/engine/locomotion_system.py",
++    "src/engine/objectives_system.py",
++    "src/engine/ballistics_system.py",
++    "src/engine/spatial_system.py",
++}
++
++COLD_EXEMPT_FUNCS = {
++    "update_gates",
++    "check_battle_status",
++}
++
+ 
+ def _iter_active_py_files(root: Path) -> list[tuple[str, Path]]:
+     result = []
+@@ -282,6 +297,7 @@ def run_xray(
+     deps_class: str | None = None,
+     strict: bool = False,
+     strict_all: bool = False,
++    show_silent: bool = False,
+ ) -> int:
+     files = _iter_active_py_files(root)
+ 
+@@ -370,10 +386,15 @@ def run_xray(
+         f401 = _check_f401_ast(files, parsed)
+ 
+     hot_loop_syncs = [g for g in gpu_syncs if g["hot_loop_sync"]]
+-    core_hot_loop_syncs = [
+-        g for g in hot_loop_syncs
+-        if g["file"] == "src/engine_core.py" and g["func"] in ("_step_internal", "_atomic_commit_pipeline")
+-    ]
++    core_hot_loop_syncs = []
++    for g in hot_loop_syncs:
++        if g["file"] == "src/engine_core.py":
++            if g["func"] in ("_step_internal", "_atomic_commit_pipeline"):
++                core_hot_loop_syncs.append(g)
++        elif g["file"] in CORE_HOT_LOOP_FILES:
++            if g["func"] not in COLD_EXEMPT_FUNCS:
++                core_hot_loop_syncs.append(g)
++
+     top_funcs = sorted(funcs_info, key=lambda x: (x["loc"], x["cc"]), reverse=True)[:8]
+ 
+     report = {
+@@ -418,6 +439,11 @@ def run_xray(
+             for u in f401[:10]:
+                 print(f"  {u['file']}:{u['line']} {u['symbol']}")
+ 
++        if silent_excepts and (show_silent or not compact):
++            print("SILENT_EXCEPTS:")
++            for se in silent_excepts:
++                print(f"  {se['file']}:{se['line']}")
++
+         by_file_locks: dict[str, list[str]] = defaultdict(list)
+         for lk in locks:
+             tag = f"{lk['line']}({lk['lock']}{',NESTED' if lk['nested'] else ''})"

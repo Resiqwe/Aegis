@@ -28,8 +28,9 @@ from tools.perf_runner import run_profile, run_bench
 from tools.snap_inspector import list_snapshots, inspect_snapshot, diff_snapshots
 
 
-def _run_health(root: Path) -> int:
-    print("=== [1/4] PY_COMPILE ===")
+def _run_health(root: Path, fast: bool = False) -> int:
+    total_steps = 4 if fast else 5
+    print(f"=== [1/{total_steps}] PY_COMPILE ===")
     py_files = [str(p) for _, p in _iter_active_py_files(root)]
     comp = subprocess.run([sys.executable, "-m", "py_compile", *py_files], cwd=str(root))
     if comp.returncode != 0:
@@ -37,24 +38,57 @@ def _run_health(root: Path) -> int:
         return 1
     print(f"  OK ({len(py_files)} souborů)")
 
-    print("\n=== [2/4] XRAY --STRICT ===")
+    print(f"\n=== [2/{total_steps}] XRAY --STRICT ===")
     xr_code = run_xray(root, compact=True, strict=True)
     if xr_code != 0:
         print("[HEALTH FAIL] xray --strict nalezl F401 nebo zakázaný GPU sync v core hot-loopu.")
         return 1
 
-    print("\n=== [3/4] TEST SUITE (tests/test_suite.py) ===")
+    print(f"\n=== [3/{total_steps}] TEST SUITE (tests/test_suite.py) ===")
     t_proc = subprocess.run([sys.executable, str(root / "tests" / "test_suite.py"), "-v"], cwd=str(root))
     if t_proc.returncode != 0:
         print("[HEALTH FAIL] test_suite.py selhal.")
         return 1
 
-    print("\n=== [4/4] GIT STATUS ===")
+    if not fast:
+        print(f"\n=== [4/{total_steps}] GOLDEN MASTER (tests/test_golden_master.py) ===")
+        gm_proc = subprocess.run([sys.executable, "-m", "pytest", str(root / "tests" / "test_golden_master.py"), "-v"], cwd=str(root))
+        if gm_proc.returncode != 0:
+            print("[HEALTH FAIL] test_golden_master.py selhal.")
+            return 1
+
+    git_step = f"[{total_steps}/{total_steps}]"
+    print(f"\n=== {git_step} GIT STATUS ===")
     g_proc = subprocess.run(["git", "status", "--short"], cwd=str(root), capture_output=True, text=True)
     out = (g_proc.stdout or "").strip()
     print(out if out else "  (čistý pracovní strom)")
 
     print("\n[AEGIS HEALTH] ALL CHECKS PASSED (exit=0)")
+    return 0
+
+
+def _run_git_diff(root: Path, name: str) -> int:
+    """Spustí git diff, uloží výstup do plany/<name>.diff a do konzole vypíše pouze git diff --stat."""
+    plany_dir = root / "plany"
+    plany_dir.mkdir(parents=True, exist_ok=True)
+    clean_name = name if name.endswith(".diff") else f"{name}.diff"
+    diff_file = plany_dir / clean_name
+
+    diff_proc = subprocess.run(["git", "diff"], cwd=str(root), capture_output=True, text=True)
+    if diff_proc.returncode != 0:
+        err = diff_proc.stderr.strip()
+        print(f"[!] Chyba při spouštění git diff: {err}")
+        return diff_proc.returncode
+
+    diff_file.write_text(diff_proc.stdout, encoding="utf-8")
+    print(f"[AEGIS DIFF] Diff uložen do: {diff_file.as_posix()}")
+
+    stat_proc = subprocess.run(["git", "diff", "--stat"], cwd=str(root), capture_output=True, text=True)
+    out = (stat_proc.stdout or "").strip()
+    if out:
+        print(out)
+    else:
+        print("  (žádné změny v pracovní kopii)")
     return 0
 
 
@@ -79,6 +113,7 @@ def main() -> int:
     # xray
     p_xray = sub.add_parser("xray", help="Statický AST rentgen kódu")
     p_xray.add_argument("--compact", action="store_true", help="Kompaktní výstup pro LLM")
+    p_xray.add_argument("--show-silent", action="store_true", help="Zobrazí seznam tichých exceptů")
     p_xray.add_argument("--json", action="store_true", help="JSON výstup")
     p_xray.add_argument("--deps", type=str, default=None, help="Mapa READS/WRITES atributů pro zadanou třídu")
     p_xray.add_argument("--strict", action="store_true", help="Exit code 1 při F401 nebo core hot-loop GPU syncu")
@@ -121,8 +156,13 @@ def main() -> int:
     # probe (delegováno výše před parse_args, zde pro zobrazení v --help)
     sub.add_parser("probe", add_help=False, help="Neinvazivní per-process HW sonda (deleguje na devtools/hw_probe.py)")
 
+    # diff
+    p_diff = sub.add_parser("diff", help="Uloží git diff do plany/<name>.diff a vypíše kompaktní stat")
+    p_diff.add_argument("name", type=str, help="Název výstupního souboru diffu (např. tooling_upgrade)")
+
     # health
-    sub.add_parser("health", help="Kompletní pre-commit gate (py_compile + xray + tests + git)")
+    p_health = sub.add_parser("health", help="Kompletní pre-commit gate (py_compile + xray + tests + golden_master + git)")
+    p_health.add_argument("--fast", action="store_true", help="Přeskočí test_golden_master.py pro bleskovou kontrolu")
 
     args = parser.parse_args()
 
@@ -134,6 +174,7 @@ def main() -> int:
             deps_class=args.deps,
             strict=args.strict,
             strict_all=args.strict_all,
+            show_silent=args.show_silent,
         )
     if args.cmd == "profile":
         return run_profile(
@@ -162,8 +203,10 @@ def main() -> int:
             return inspect_snapshot(args.path, as_json=args.json)
         if args.snaps_cmd == "diff":
             return diff_snapshots(args.path_a, args.path_b, as_json=args.json)
+    if args.cmd == "diff":
+        return _run_git_diff(ROOT, args.name)
     if args.cmd == "health":
-        return _run_health(ROOT)
+        return _run_health(ROOT, fast=args.fast)
     return 0
 
 
