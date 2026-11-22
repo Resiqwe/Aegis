@@ -230,7 +230,8 @@ class CyberTacticsLauncher:
                             rec = json.loads(line)
                             if rec.get("type") == "EPOCH_COMPLETED":
                                 self.epochs_data.append(rec)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
+                # Očekávané při poškozeném nebo rozepsaném JSONL logu
                 pass
 
         self.heatmap_grid.fill(0)
@@ -247,7 +248,8 @@ class CyberTacticsLauncher:
                     xs = np.clip((df["x"].to_numpy() / float(WORLD_W)) * 36, 0, 35).astype(np.int32)
                     ys = np.clip((df["y"].to_numpy() / float(WORLD_H)) * 22, 0, 21).astype(np.int32)
                     np.add.at(self.heatmap_grid, (ys, xs), 1)
-            except Exception:
+            except (ImportError, OSError, KeyError, ValueError):
+                # Očekávané pokud chybí pandas, parquet engine nebo soubor nebyl dočten
                 pass
 
     def refresh_telemetry_live(self):
@@ -653,7 +655,8 @@ class CyberTacticsLauncher:
                         os.remove(dest)
                     shutil.move(fp, dest)
                     count += 1
-                except Exception:
+                except OSError:
+                    # Očekávané pokud je soubor uzamčen běžícím procesem
                     pass
         self.epochs_data.clear()
         self.heatmap_grid.fill(0)

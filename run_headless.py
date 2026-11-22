@@ -27,7 +27,8 @@ if sys.stderr is None:
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except (OSError, ValueError):
+        # Očekávané v headless konzoli bez podpory reconfigure
         pass
 
 import torch
@@ -66,7 +67,8 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
         old_path = os.path.join(telemetry_dir, old_snap)
         try:
             os.remove(old_path)
-        except Exception:
+        except OSError:
+            # Soubor může být uzamčen souběžným procesem
             pass
 
     # Smazání starých parquet souborů
@@ -79,7 +81,8 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
         old_path = os.path.join(telemetry_dir, old_pq)
         try:
             os.remove(old_path)
-        except Exception:
+        except OSError:
+            # Soubor může být uzamčen souběžným procesem
             pass
 
 

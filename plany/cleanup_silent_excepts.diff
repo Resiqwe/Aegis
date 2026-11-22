@@ -1,0 +1,160 @@
+diff --git a/launcher.py b/launcher.py
+index 2bec524..0706d57 100644
+--- a/launcher.py
++++ b/launcher.py
+@@ -230,7 +230,8 @@ class CyberTacticsLauncher:
+                             rec = json.loads(line)
+                             if rec.get("type") == "EPOCH_COMPLETED":
+                                 self.epochs_data.append(rec)
+-            except Exception:
++            except (OSError, json.JSONDecodeError):
++                # Očekávané při poškozeném nebo rozepsaném JSONL logu
+                 pass
+ 
+         self.heatmap_grid.fill(0)
+@@ -247,7 +248,8 @@ class CyberTacticsLauncher:
+                     xs = np.clip((df["x"].to_numpy() / float(WORLD_W)) * 36, 0, 35).astype(np.int32)
+                     ys = np.clip((df["y"].to_numpy() / float(WORLD_H)) * 22, 0, 21).astype(np.int32)
+                     np.add.at(self.heatmap_grid, (ys, xs), 1)
+-            except Exception:
++            except (ImportError, OSError, KeyError, ValueError):
++                # Očekávané pokud chybí pandas, parquet engine nebo soubor nebyl dočten
+                 pass
+ 
+     def refresh_telemetry_live(self):
+@@ -653,7 +655,8 @@ class CyberTacticsLauncher:
+                         os.remove(dest)
+                     shutil.move(fp, dest)
+                     count += 1
+-                except Exception:
++                except OSError:
++                    # Očekávané pokud je soubor uzamčen běžícím procesem
+                     pass
+         self.epochs_data.clear()
+         self.heatmap_grid.fill(0)
+diff --git a/run_headless.py b/run_headless.py
+index b333576..f5f36de 100644
+--- a/run_headless.py
++++ b/run_headless.py
+@@ -27,7 +27,8 @@ if sys.stderr is None:
+ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+     try:
+         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+-    except Exception:
++    except (OSError, ValueError):
++        # Očekávané v headless konzoli bez podpory reconfigure
+         pass
+ 
+ import torch
+@@ -66,7 +67,8 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
+         old_path = os.path.join(telemetry_dir, old_snap)
+         try:
+             os.remove(old_path)
+-        except Exception:
++        except OSError:
++            # Soubor může být uzamčen souběžným procesem
+             pass
+ 
+     # Smazání starých parquet souborů
+@@ -79,7 +81,8 @@ def cleanup_old_telemetry(telemetry_dir: str, max_snapshots: int = MAX_SNAPSHOTS
+         old_path = os.path.join(telemetry_dir, old_pq)
+         try:
+             os.remove(old_path)
+-        except Exception:
++        except OSError:
++            # Soubor může být uzamčen souběžným procesem
+             pass
+ 
+ 
+diff --git a/scripts/baseline_bench.json b/scripts/baseline_bench.json
+index a474710..1b2b29f 100644
+--- a/scripts/baseline_bench.json
++++ b/scripts/baseline_bench.json
+@@ -3,9 +3,9 @@
+   "ticks": 500,
+   "seed": 42,
+   "device": "cuda:0",
+-  "total_sec": 6.7657,
+-  "ms_per_tick": 13.531,
+-  "tps": 73.9,
++  "total_sec": 6.8882,
++  "ms_per_tick": 13.776,
++  "tps": 72.6,
+   "contract_errors": [],
+   "metrics": {
+     "tick_counter": 515,
+diff --git a/src/hardware_telemetry.py b/src/hardware_telemetry.py
+index 8317f57..e53a317 100644
+--- a/src/hardware_telemetry.py
++++ b/src/hardware_telemetry.py
+@@ -98,7 +98,8 @@ class HardwareTelemetryTracker:
+                 sys_ram_used_gb = sys_ram.used / (1024 ** 3)
+                 sys_ram_total_gb = sys_ram.total / (1024 ** 3)
+                 sys_ram_pct = sys_ram.percent
+-            except Exception:
++            except (psutil.Error, OSError, AttributeError):
++                # Očekávané při ukončování procesu nebo nedostupnosti systémového čítače
+                 pass
+ 
+         # 2. GPU & VRAM
+@@ -115,7 +116,8 @@ class HardwareTelemetryTracker:
+                 mem = pynvml.nvmlDeviceGetMemoryInfo(_nvml_handle)
+                 gpu_mem_used_mb = mem.used / (1024 ** 2)
+                 gpu_mem_total_mb = mem.total / (1024 ** 2)
+-            except Exception:
++            except (pynvml.NVMLError, OSError, AttributeError):
++                # Očekávané při ztrátě NVML kontextu nebo nekompatibilitě ovladače
+                 pass
+ 
+         torch_alloc = torch.cuda.memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0.0
+@@ -167,7 +169,8 @@ class HardwareTelemetryTracker:
+             df = pd.DataFrame(clean_records)
+             df.to_parquet(self.parquet_path, index=False)
+             df.to_csv(self.csv_path, index=False)
+-        except Exception:
++        except (ImportError, OSError, ValueError):
++            # Očekávané pokud selže zápis na disk nebo chybí parquet engine
+             pass
+ 
+     def get_optimization_summary(self) -> dict:
+diff --git a/src/telemetry_lab.py b/src/telemetry_lab.py
+index e79f9b9..a802de6 100644
+--- a/src/telemetry_lab.py
++++ b/src/telemetry_lab.py
+@@ -28,12 +28,14 @@ from datetime import datetime
+ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+     try:
+         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+-    except Exception:
++    except (OSError, ValueError):
++        # Očekávané v headless konzoli bez podpory reconfigure
+         pass
+ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+     try:
+         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+-    except Exception:
++    except (OSError, ValueError):
++        # Očekávané v headless konzoli bez podpory reconfigure
+         pass
+ 
+ import numpy as np
+@@ -111,7 +113,8 @@ class TelemetryLab:
+                         obj = json.loads(line)
+                         if obj.get("type") == "EPOCH_COMPLETED":
+                             self.epochs_data.append(obj)
+-                    except Exception:
++                    except json.JSONDecodeError:
++                        # Ignorujeme poškozené nebo neúplně zapsané řádky
+                         pass
+ 
+         # 2. Načtení prostorových dat (Parquet)
+@@ -558,7 +561,8 @@ class TelemetryLab:
+         </div>
+     </div>
+ """
+-            except Exception:
++            except (ImportError, OSError, KeyError, ValueError):
++                # Očekávané pokud nelze načíst parquet hardware profilace
+                 pass
+ 
+         html_content = f"""<!DOCTYPE html>

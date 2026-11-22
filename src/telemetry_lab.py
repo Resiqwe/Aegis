@@ -28,12 +28,14 @@ from datetime import datetime
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except (OSError, ValueError):
+        # Očekávané v headless konzoli bez podpory reconfigure
         pass
 if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
+    except (OSError, ValueError):
+        # Očekávané v headless konzoli bez podpory reconfigure
         pass
 
 import numpy as np
@@ -111,7 +113,8 @@ class TelemetryLab:
                         obj = json.loads(line)
                         if obj.get("type") == "EPOCH_COMPLETED":
                             self.epochs_data.append(obj)
-                    except Exception:
+                    except json.JSONDecodeError:
+                        # Ignorujeme poškozené nebo neúplně zapsané řádky
                         pass
 
         # 2. Načtení prostorových dat (Parquet)
@@ -558,7 +561,8 @@ class TelemetryLab:
         </div>
     </div>
 """
-            except Exception:
+            except (ImportError, OSError, KeyError, ValueError):
+                # Očekávané pokud nelze načíst parquet hardware profilace
                 pass
 
         html_content = f"""<!DOCTYPE html>
