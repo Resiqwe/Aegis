@@ -98,7 +98,8 @@ class HardwareTelemetryTracker:
                 sys_ram_used_gb = sys_ram.used / (1024 ** 3)
                 sys_ram_total_gb = sys_ram.total / (1024 ** 3)
                 sys_ram_pct = sys_ram.percent
-            except Exception:
+            except (psutil.Error, OSError, AttributeError):
+                # Očekávané při ukončování procesu nebo nedostupnosti systémového čítače
                 pass
 
         # 2. GPU & VRAM
@@ -115,7 +116,8 @@ class HardwareTelemetryTracker:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(_nvml_handle)
                 gpu_mem_used_mb = mem.used / (1024 ** 2)
                 gpu_mem_total_mb = mem.total / (1024 ** 2)
-            except Exception:
+            except (pynvml.NVMLError, OSError, AttributeError):
+                # Očekávané při ztrátě NVML kontextu nebo nekompatibilitě ovladače
                 pass
 
         torch_alloc = torch.cuda.memory_allocated() / (1024 ** 2) if torch.cuda.is_available() else 0.0
@@ -167,7 +169,8 @@ class HardwareTelemetryTracker:
             df = pd.DataFrame(clean_records)
             df.to_parquet(self.parquet_path, index=False)
             df.to_csv(self.csv_path, index=False)
-        except Exception:
+        except (ImportError, OSError, ValueError):
+            # Očekávané pokud selže zápis na disk nebo chybí parquet engine
             pass
 
     def get_optimization_summary(self) -> dict:

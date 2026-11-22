@@ -103,16 +103,6 @@ class LockFreeStateBridge:
             self._selected_unit_id = None if unit_id is None or unit_id < 0 else int(unit_id)
             self._auto_select_best = bool(auto_select_best) or (self._selected_unit_id is None)
 
-    def get_selected_unit(self) -> int | None:
-        """Vrátí aktuální selected_unit_id pod zámkem."""
-        with self._lock:
-            return self._selected_unit_id
-
-    def get_auto_select_best(self) -> bool:
-        """Vrátí aktuální auto_select_best pod zámkem."""
-        with self._lock:
-            return self._auto_select_best
-
     def get_selected_unit_request(self) -> tuple[int | None, bool]:
         """Vrátí (selected_unit_id, auto_select_best) pro SimWorker vlákno."""
         with self._lock:

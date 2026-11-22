@@ -42,7 +42,6 @@ except ImportError:
 import glob
 import json
 import time
-import math
 import importlib
 import webbrowser
 
@@ -61,60 +60,17 @@ import telemetry_lab
 import hardware_telemetry
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
-
-# Barevná paleta - Sleek Modern Dark
-BG_VOID = (9, 11, 16)
-PANEL_SURFACE = (15, 19, 28)
-PANEL_ELEVATED = (20, 26, 38)
-CARD_BG = (17, 22, 33)
-BORDER_SUBTLE = (30, 40, 58)
-BORDER_FOCUS = (0, 240, 210)
-
-TEXT_HEAD = (242, 246, 252)
-TEXT_BODY = (185, 198, 218)
-TEXT_MUTED = (120, 136, 162)
-
-ACCENT_CYAN = (0, 240, 210)
-ACCENT_AMBER = (255, 195, 30)
-ACCENT_GREEN = (65, 235, 100)
-ACCENT_ROSE = (255, 55, 115)
-ACCENT_PURPLE = (175, 80, 250)
-
-FACTION_THEMES = [
-    {"name": "ALPHA VANGUARD", "short": "ALPHA", "color": ACCENT_CYAN, "bg": (0, 35, 32)},
-    {"name": "OMEGA SYNDICATE", "short": "OMEGA", "color": ACCENT_ROSE, "bg": (40, 10, 20)},
-    {"name": "SOLAR CORE", "short": "SOLAR", "color": ACCENT_AMBER, "bg": (38, 28, 5)},
-    {"name": "PHANTOM UNIT", "short": "PHANTOM", "color": ACCENT_PURPLE, "bg": (28, 12, 42)},
-]
-
-CLASS_COLORS = [(74, 144, 226), (65, 235, 100), (255, 195, 25), (231, 76, 60)]
-
-
-def safe_rgb(col, default=(200, 200, 200)) -> tuple[int, int, int]:
-    try:
-        return (
-            max(0, min(255, int(col[0]))),
-            max(0, min(255, int(col[1]))),
-            max(0, min(255, int(col[2]))),
-        )
-    except Exception:
-        return default
-
-
-class ModernTextCache:
-    """Blesková textová cache: eliminuje 95 % CPU overheadu z font.render v každém snímku."""
-    def __init__(self):
-        self._cache = {}
-
-    def render(self, font: pygame.font.Font, text: str, color: tuple, bold: bool = False) -> pygame.Surface:
-        key = (id(font), text, color)
-        surf = self._cache.get(key)
-        if surf is None:
-            surf = font.render(text, True, color)
-            if len(self._cache) > 2000:
-                self._cache.clear()
-            self._cache[key] = surf
-        return surf
+from src.ui.widgets import (
+    BG_VOID, PANEL_SURFACE, CARD_BG, BORDER_SUBTLE, TEXT_BODY, TEXT_MUTED,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_ROSE, FACTION_THEMES, CLASS_COLORS,
+    ModernTextCache, draw_card as _draw_card, draw_launcher_button as _draw_launcher_button,
+)
+from src.ui.launcher_panels import (
+    draw_modern_dock as _draw_modern_dock,
+    draw_modern_radar as _draw_modern_radar,
+    draw_graphical_heatmap as _draw_graphical_heatmap,
+    draw_modern_analytics as _draw_modern_analytics,
+)
 
 
 class CyberTacticsLauncher:
@@ -274,7 +230,8 @@ class CyberTacticsLauncher:
                             rec = json.loads(line)
                             if rec.get("type") == "EPOCH_COMPLETED":
                                 self.epochs_data.append(rec)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
+                # Očekávané při poškozeném nebo rozepsaném JSONL logu
                 pass
 
         self.heatmap_grid.fill(0)
@@ -287,10 +244,12 @@ class CyberTacticsLauncher:
                 df = pd.read_parquet(pq_files[0])
                 self.total_spatial_events = len(df)
                 if len(df) > 0:
-                    xs = np.clip((df["x"].to_numpy() / 1600.0) * 36, 0, 35).astype(np.int32)
-                    ys = np.clip((df["y"].to_numpy() / 1000.0) * 22, 0, 21).astype(np.int32)
+                    from config import WORLD_W, WORLD_H
+                    xs = np.clip((df["x"].to_numpy() / float(WORLD_W)) * 36, 0, 35).astype(np.int32)
+                    ys = np.clip((df["y"].to_numpy() / float(WORLD_H)) * 22, 0, 21).astype(np.int32)
                     np.add.at(self.heatmap_grid, (ys, xs), 1)
-            except Exception:
+            except (ImportError, OSError, KeyError, ValueError):
+                # Očekávané pokud chybí pandas, parquet engine nebo soubor nebyl dočten
                 pass
 
     def refresh_telemetry_live(self):
@@ -415,45 +374,15 @@ class CyberTacticsLauncher:
             pygame.event.clear(pygame.MOUSEBUTTONDOWN)
 
     def draw_card(self, rect: pygame.Rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8):
-        pygame.draw.rect(self.screen, bg, rect, border_radius=radius)
-        if border:
-            pygame.draw.rect(self.screen, border, rect, width=1, border_radius=radius)
+        _draw_card(self.screen, rect, bg=bg, border=border, radius=radius)
 
     def draw_button(self, key: str, rect: pygame.Rect, title: str, subtitle: str = "",
                     active: bool = False, accent=ACCENT_CYAN, radius=6, disabled: bool = False):
-        self.ui_buttons[key] = rect
-        mx, my = pygame.mouse.get_pos()
-        hover = rect.collidepoint(mx, my) and not disabled
-
-        acc = safe_rgb(accent)
-        if disabled:
-            bg = (14, 18, 26)
-            border = (32, 40, 52)
-            text_col = (70, 85, 105)
-        elif active:
-            bg = (int(acc[0] * 0.18), int(acc[1] * 0.18), int(acc[2] * 0.18))
-            border = acc
-            text_col = acc
-        elif hover:
-            bg = PANEL_ELEVATED
-            border = (120, 160, 210)
-            text_col = TEXT_HEAD
-        else:
-            bg = CARD_BG
-            border = BORDER_SUBTLE
-            text_col = TEXT_BODY
-
-        pygame.draw.rect(self.screen, bg, rect, border_radius=radius)
-        pygame.draw.rect(self.screen, border, rect, width=1, border_radius=radius)
-
-        if subtitle:
-            t1 = self.text_cache.render(self.f_sub, title, text_col)
-            t2 = self.text_cache.render(self.f_tiny, subtitle, TEXT_MUTED)
-            self.screen.blit(t1, (rect.x + 12, rect.y + 6))
-            self.screen.blit(t2, (rect.x + 12, rect.y + 24))
-        else:
-            t1 = self.text_cache.render(self.f_sub, title, text_col)
-            self.screen.blit(t1, (rect.centerx - t1.get_width() // 2, rect.centery - t1.get_height() // 2))
+        _draw_launcher_button(
+            self.screen, self.ui_buttons, self.text_cache, self.f_sub, self.f_tiny,
+            key=key, rect=rect, title=title, subtitle=subtitle,
+            active=active, accent=accent, radius=radius, disabled=disabled,
+        )
 
     def render(self):
         W, H = self.screen.get_size()
@@ -605,330 +534,92 @@ class CyberTacticsLauncher:
         self.screen.blit(t_perf, (W - t_perf.get_width() - 18, bar_y + (foot_h - t_perf.get_height()) // 2))
 
     def _draw_modern_dock(self, rect: pygame.Rect, state: dict | None = None):
-        """Levý řídící dok: Ovládání běhu, parametry mapy a správa modelů."""
-        if state is None:
-            return
-        self.draw_card(rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8)
-
-        x = rect.x + 14
-        w = rect.width - 28
-        y = rect.y + 14
-
-        # Sekce 1: Řízení operace
-        t_sec1 = self.text_cache.render(self.f_title, "1. ŘÍZENÍ OPERACE", ACCENT_CYAN)
-        self.screen.blit(t_sec1, (x, y))
-        y += int(26 * self.scale)
-
-        box_h = max(64, int(72 * self.scale))
-        self.draw_card(pygame.Rect(x, y, w, box_h), bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
-
-        if self.sim_active:
-            status_txt = "⏸ POZASTAVENO" if self.sim_paused else "🟢 KONTINUÁLNÍ SIMULACE BĚŽÍ"
-            st_col = ACCENT_AMBER if self.sim_paused else ACCENT_GREEN
-            self.screen.blit(self.text_cache.render(self.f_sub, status_txt, st_col), (x + 10, y + 8))
-
-            # Use state snapshot data instead of direct engine tensor access
-            alive_counts = state.get("alive_counts", [0, 0, 0, 0])
-            init_counts = state.get("initial_team_counts", [0, 0, 0, 0])
-            generals_meta = state.get("generals", [])
-
-            ep_num = state.get("current_epoch", self.engine.current_epoch)
-            t_sec = int(state.get("operation_time_sec", self.engine.operation_time_sec))
-            alive_cnt = sum(alive_counts) if len(alive_counts) > 0 else 0
-            tot_cnt = state.get("N", getattr(self.engine, "N", 400))
-            scen_idx = state.get("scenario_idx", self.engine.current_scenario_idx)
-            scen_name = scenarios.SCENARIO_NAMES[scen_idx].split("(")[0].strip()
-            self.screen.blit(self.text_cache.render(self.f_small, f"Epocha #{ep_num:02d} • {t_sec//60:02d}:{t_sec%60:02d} • Živých: {alive_cnt}/{tot_cnt}", TEXT_HEAD), (x + 10, y + int(28 * self.scale)))
-            self.screen.blit(self.text_cache.render(self.f_tiny, f"Mapa: {scen_name}", TEXT_MUTED), (x + 10, y + int(48 * self.scale)))
-        else:
-            self.screen.blit(self.text_cache.render(self.f_sub, "⚪ SIMULÁTOR ZASTAVEN", TEXT_MUTED), (x + 10, y + 8))
-            self.screen.blit(self.text_cache.render(self.f_small, "Připraven ke startu nové kampaně.", TEXT_BODY), (x + 10, y + int(28 * self.scale)))
-            self.screen.blit(self.text_cache.render(self.f_tiny, self.sim_status_line[:40], ACCENT_AMBER), (x + 10, y + int(48 * self.scale)))
-
-        y += box_h + 12
-
-        # Tlačítka start/náhled
-        btn_h = max(38, int(42 * self.scale))
-        if self.sim_active:
-            self.draw_button("open_preview", pygame.Rect(x, y, w, btn_h), "👁️ ŽIVÝ NÁHLED BOJIŠTĚ", "60 FPS vykreslení (Mezerník)", active=True, accent=ACCENT_CYAN)
-            y += btn_h + 8
-
-            half_w = (w - 8) // 2
-            p_lbl = "▶ POKRAČOVAT" if self.sim_paused else "⏸ POZASTAVIT"
-            self.draw_button("toggle_pause", pygame.Rect(x, y, half_w, 32), p_lbl, active=True, accent=ACCENT_GREEN if self.sim_paused else ACCENT_AMBER)
-            self.draw_button("stop_sim", pygame.Rect(x + half_w + 8, y, half_w, 32), "⏹ UKONČIT", active=True, accent=ACCENT_ROSE)
-            y += 40
-
-            # Rychlost simulace
-            self.screen.blit(self.text_cache.render(self.f_tiny, "RYCHLOST VÝPOČTU:", TEXT_MUTED), (x, y))
-            y += 16
-            sp_w = (w - 20) // 6
-            for idx, sp_lbl in enumerate(self.speed_presets):
-                self.draw_button(f"sim_speed_{idx}", pygame.Rect(x + idx * (sp_w + 4), y, sp_w, 24), sp_lbl, active=(self.sim_speed_idx == idx), accent=ACCENT_AMBER if idx >= 4 else ACCENT_CYAN)
-            y += 32
-        else:
-            snap_selected = bool(self.snapshots)
-            s_tag = "Pokračovat z vybraného modelu" if self.start_from_snapshot else "Start nové čisté evoluce"
-            self.draw_button("start_continuous", pygame.Rect(x, y, w, btn_h), "▶ SPUSTIT TRÉNOVAT", s_tag, active=True, accent=ACCENT_GREEN)
-            y += btn_h + 8
-
-            bw = (w - 8) // 3
-            for idx, ep_cnt in enumerate([10, 25, 50]):
-                self.draw_button(f"start_batch_{ep_cnt}", pygame.Rect(x + idx * (bw + 4), y, bw, 28), f"+{ep_cnt} EPOCH", active=True, accent=ACCENT_AMBER)
-            y += 36
-
-            half_w = (w - 8) // 2
-            self.draw_button("mode_new", pygame.Rect(x, y, half_w, 26), "🌱 ČISTÁ KAMPAŇ", active=(not self.start_from_snapshot), accent=ACCENT_GREEN)
-            self.draw_button("mode_snap", pygame.Rect(x + half_w + 8, y, half_w, 26), "📂 ZE SNAPSHOTU", active=self.start_from_snapshot, accent=ACCENT_CYAN)
-            y += 34
-
-        # Sekce 2: Parametry bojiště
-        t_sec2 = self.text_cache.render(self.f_title, "2. PARAMETRY BOJE", ACCENT_AMBER)
-        self.screen.blit(t_sec2, (x, y))
-        y += int(24 * self.scale)
-
-        mw = (w - 8) // 3
-        for s_idx, m_name in enumerate(["DOMINATION", "CITADEL", "CHASM"]):
-            self.draw_button(f"scen_{s_idx}", pygame.Rect(x + s_idx * (mw + 4), y, mw, 26), m_name, active=(self.selected_scenario == s_idx), accent=ACCENT_CYAN, disabled=self.sim_active)
-        y += 32
-
-        uw = (w - 12) // 4
-        b_labels = ["150 b.", "250 b.", "350 b.", "500 b."]
-        for u_idx, b_lbl in enumerate(b_labels):
-            self.draw_button(f"units_{u_idx}", pygame.Rect(x + u_idx * (uw + 4), y, uw, 24), b_lbl, active=(self.selected_units_idx == u_idx), accent=ACCENT_AMBER, disabled=self.sim_active)
-        y += 32
-
-        # Sekce 3: Uložené modely (.pt)
-        t_sec3 = self.text_cache.render(self.f_title, "3. ARCHIV MODELŮ (.PT)", ACCENT_CYAN)
-        self.screen.blit(t_sec3, (x, y))
-        y += int(24 * self.scale)
-
-        list_h = rect.bottom - y - 46
-        list_rect = pygame.Rect(x, y, w, max(50, list_h))
-        self.draw_card(list_rect, bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
-
-        self.snapshot_box_rect = list_rect
-        if not self.snapshots:
-            self.screen.blit(self.text_cache.render(self.f_small, "Žádné uložené modely.", TEXT_MUTED), (x + 12, y + 14))
-        else:
-            row_step = max(20, int(22 * self.scale))
-            max_rows = max(1, (list_rect.height - 8) // row_step)
-            max_scroll = max(0, len(self.snapshots) - max_rows)
-            self.snapshot_scroll_offset = max(0, min(self.snapshot_scroll_offset, max_scroll))
-            visible_snaps = self.snapshots[self.snapshot_scroll_offset : self.snapshot_scroll_offset + max_rows]
-
-            for row_i, sp in enumerate(visible_snaps):
-                idx = self.snapshot_scroll_offset + row_i
-                ry = list_rect.y + 4 + row_i * row_step
-                r_rect = pygame.Rect(x + 4, ry, w - 8, row_step - 2)
-                self.snapshot_rects.append((idx, r_rect))
-                is_sel = (idx == self.selected_snapshot_idx)
-                if is_sel:
-                    pygame.draw.rect(self.screen, (24, 46, 68), r_rect, border_radius=4)
-                    pygame.draw.rect(self.screen, ACCENT_CYAN, r_rect, width=1, border_radius=4)
-                sz_mb = os.path.getsize(sp) / (1024 ** 2) if os.path.exists(sp) else 0.0
-                bname = os.path.basename(sp)
-                s_lbl = f"{'' if is_sel else '  '}{bname[:28]} ({sz_mb:.1f}MB)"
-                self.screen.blit(self.text_cache.render(self.f_tiny, s_lbl, ACCENT_CYAN if is_sel else TEXT_BODY), (r_rect.x + 6, r_rect.y + 3))
-
-            if len(self.snapshots) > max_rows:
-                # Malý scroller indikátor
-                scroll_h = max(14, int((max_rows / len(self.snapshots)) * list_rect.height))
-                scroll_y = list_rect.y + int((self.snapshot_scroll_offset / float(max_scroll)) * (list_rect.height - scroll_h))
-                pygame.draw.rect(self.screen, (50, 70, 95), (list_rect.right - 5, scroll_y, 4, scroll_h), border_radius=2)
-
-        y = list_rect.bottom + 8
-        bw = (w - 8) // 3
-        self.draw_button("run_lab", pygame.Rect(x, y, bw, 30), "📊 REPORT", accent=ACCENT_GREEN)
-        self.draw_button("export_csv", pygame.Rect(x + bw + 4, y, bw, 30), "💾 EXPORT", accent=ACCENT_CYAN)
-        self.draw_button("clean_logs", pygame.Rect(x + 2 * (bw + 4), y, bw, 30), "🧹 VYČISTIT", accent=ACCENT_ROSE)
+        _draw_modern_dock(self, rect, state)
 
     def _draw_modern_radar(self, rect: pygame.Rect, state: dict):
-        """Střední velký taktický Holo-Radar."""
-        self.draw_card(rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8)
-
-        # Záložky a titulek
-        scen_name = state.get("scenario_name", "Bojiště").split("(")[0].strip()
-        t_sec = int(self.engine.operation_time_sec) if self.sim_active else 0
-        alive_cnt = int(state["alive"].sum()) if ("alive" in state and len(state["alive"])) else 0
-        tot_cnt = len(state.get("hp", []))
-
-        hdr_str = f"🛰️ TAKTICKÝ RADAR // {scen_name.upper()}"
-        self.screen.blit(self.text_cache.render(self.f_title, hdr_str, ACCENT_CYAN), (rect.x + 14, rect.y + 12))
-
-        # Tlačítka záložek
-        btn_w = 110
-        self.draw_button("tab_radar", pygame.Rect(rect.right - 2 * btn_w - 18, rect.y + 10, btn_w, 28), "RADAR", active=(self.view_mode == "RADAR"), accent=ACCENT_CYAN)
-        self.draw_button("tab_heatmap", pygame.Rect(rect.right - btn_w - 14, rect.y + 10, btn_w, 28), "HEATMAPA", active=(self.view_mode == "HEATMAP"), accent=ACCENT_AMBER)
-
-        # Holo-Radar Viewport
-        pad_top = 46
-        inner_w = rect.width - 24
-        inner_h = rect.height - pad_top - 14
-
-        aspect = 1600.0 / 1000.0
-        rw = inner_w
-        rh = int(rw / aspect)
-        if rh > inner_h:
-            rh = inner_h
-            rw = int(rh * aspect)
-
-        rx = rect.x + 12 + (inner_w - rw) // 2
-        ry = rect.y + pad_top + (inner_h - rh) // 2
-        r_box = pygame.Rect(rx, ry, rw, rh)
-
-        if self.view_mode == "RADAR":
-            pygame.draw.rect(self.screen, (7, 10, 15), r_box, border_radius=6)
-            pygame.draw.rect(self.screen, (28, 38, 56), r_box, width=1, border_radius=6)
-
-            def to_r(wx, wy):
-                return rx + int((wx / 1600.0) * rw), ry + int((wy / 1000.0) * rh)
-
-            faction_colors = [m["color"] for m in FACTION_THEMES]
-            r_scale = rw / 1600.0
-
-            bf_render.draw_static_map(self.screen, r_box, to_r, r_scale, state, faction_colors, mode="radar", step_px=max(24, rw // 5))
-            bf_render.draw_gates(self.screen, state.get("gates", []), to_r, faction_colors, mode="radar")
-            bf_render.draw_nodes(self.screen, state.get("nodes", []), to_r, r_scale, faction_colors)
-            bf_render.draw_tracers(self.screen, state, to_r, faction_colors)
-            bf_render.draw_heals(self.screen, state, to_r)
-            bf_render.draw_lasers(self.screen, state, to_r)
-            bf_render.draw_smoke(self.screen, state.get("smokes", []), to_r, r_scale)
-            bf_render.draw_units(self.screen, state, to_r, r_scale, 1.0, faction_colors, mode="radar", show_hp=False)
-        else:
-            self._draw_graphical_heatmap(r_box)
+        _draw_modern_radar(self, rect, state)
 
     def _draw_graphical_heatmap(self, r_box: pygame.Rect):
-        pygame.draw.rect(self.screen, (7, 10, 15), r_box, border_radius=6)
-        rows, cols = self.heatmap_grid.shape
-        cw = r_box.width / float(cols)
-        ch = r_box.height / float(rows)
-        max_v = max(1, int(np.max(self.heatmap_grid)))
-
-        for r in range(rows):
-            for c in range(cols):
-                v = self.heatmap_grid[r, c]
-                px = int(r_box.x + c * cw)
-                py = int(r_box.y + r * ch)
-                pw = max(1, int(r_box.x + (c + 1) * cw) - px - 1)
-                ph = max(1, int(r_box.y + (r + 1) * ch) - py - 1)
-
-                if v == 0:
-                    col = (13, 17, 26)
-                else:
-                    ratio = min(1.0, math.sqrt(v / float(max_v)))
-                    if ratio < 0.5:
-                        t = ratio * 2.0
-                        col = (int(15 + 230 * t), int(40 + 140 * t), int(90 * (1.0 - t) + 20))
-                    else:
-                        t = (ratio - 0.5) * 2.0
-                        col = (255, int(180 * (1.0 - t) + 30), int(20 + 80 * t))
-                pygame.draw.rect(self.screen, col, (px, py, pw, ph))
-        pygame.draw.rect(self.screen, (28, 38, 56), r_box, width=1, border_radius=6)
+        _draw_graphical_heatmap(self, r_box)
 
     def _draw_modern_analytics(self, rect: pygame.Rect, state: dict):
-        """Pravý panel: Válečný log, živá ekonomika ROI a křivka evoluce."""
-        self.draw_card(rect, bg=PANEL_SURFACE, border=BORDER_SUBTLE, radius=8)
+        _draw_modern_analytics(self, rect, state)
 
-        x = rect.x + 14
-        w = rect.width - 28
-        y = rect.y + 12
+    def _on_refresh(self):
+        self.refresh_telemetry_data()
+        self.set_status("Data byla obnovena z disku.", ACCENT_CYAN)
 
-        # -------------------------------------------------------------
-        # 1. ŽIVÝ VÁLEČNÝ PROTOKOL (WIRETAP)
-        # -------------------------------------------------------------
-        wire_h = max(90, int(105 * self.scale))
-        self.screen.blit(self.text_cache.render(self.f_title, "⚡ ŽIVÝ PROTOKOL BOJE", ACCENT_AMBER), (x, y))
-        y += int(22 * self.scale)
+    def _on_toggle_fps(self):
+        self.target_fps_idx = (self.target_fps_idx + 1) % len(self.target_fps_presets)
+        target = self.target_fps_presets[self.target_fps_idx]
+        self.set_status(f"Cílová frekvence GUI přepnuta na {target if target > 0 else 'Bez omezení'} Hz.", ACCENT_AMBER)
 
-        self.draw_card(pygame.Rect(x, y, w, wire_h), bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
-        events = state.get("events", [])
-        line_step = max(16, int(17 * self.scale))
-        max_lines = max(1, (wire_h - 10) // line_step)
-        ey = y + 6
-        for ev in events[-max_lines:]:
-            tm = ev.get("team", -1)
-            col = FACTION_THEMES[tm]["color"] if 0 <= tm < 4 else ACCENT_AMBER
-            ev_txt = ev.get("text", "")
-            if len(ev_txt) > 42:
-                ev_txt = ev_txt[:40] + ".."
-            self.screen.blit(self.text_cache.render(self.f_small, ev_txt, col), (x + 10, ey))
-            ey += line_step
-        y += wire_h + 12
+    def _on_mode_new(self):
+        self.start_from_snapshot = False
+        self.set_status("Vybrán režim: Čistá kampaň (nová evoluce).", ACCENT_GREEN)
 
-        # -------------------------------------------------------------
-        # 2. EKONOMIKA A ROI TŘÍD
-        # -------------------------------------------------------------
-        roi_h = max(110, int(125 * self.scale))
-        self.screen.blit(self.text_cache.render(self.f_title, "💰 EKONOMIKA TŘÍD (ROI)", ACCENT_CYAN), (x, y))
-        y += int(22 * self.scale)
-
-        self.draw_card(pygame.Rect(x, y, w, roi_h), bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
-        # Hlavička tabulky
-        th_y = y + 6
-        self.screen.blit(self.text_cache.render(self.f_tiny, "TŘÍDA", ACCENT_CYAN), (x + 10, th_y))
-        self.screen.blit(self.text_cache.render(self.f_tiny, "CENA", ACCENT_CYAN), (x + int(w * 0.28), th_y))
-        self.screen.blit(self.text_cache.render(self.f_tiny, "ŽIVÝCH", ACCENT_CYAN), (x + int(w * 0.44), th_y))
-        self.screen.blit(self.text_cache.render(self.f_tiny, "DMG", ACCENT_CYAN), (x + int(w * 0.64), th_y))
-        self.screen.blit(self.text_cache.render(self.f_tiny, "ROI / 1b", ACCENT_CYAN), (x + int(w * 0.82), th_y))
-
-        live_stats = state.get("live_class_stats", [])
-        row_y = th_y + 16
-        for i, cs in enumerate(live_stats[:4]):
-            c_col = CLASS_COLORS[i % 4]
-            self.screen.blit(self.text_cache.render(self.f_small, cs["name"], c_col), (x + 10, row_y))
-            self.screen.blit(self.text_cache.render(self.f_small, f"{cs['cost']} b", TEXT_BODY), (x + int(w * 0.28), row_y))
-            self.screen.blit(self.text_cache.render(self.f_small, f"{cs['alive']}/{cs['total']}", TEXT_HEAD), (x + int(w * 0.44), row_y))
-            self.screen.blit(self.text_cache.render(self.f_small, f"{cs['damage']:.0f}", TEXT_BODY), (x + int(w * 0.64), row_y))
-            self.screen.blit(self.text_cache.render(self.f_small, f"{cs['roi']:.1f}", ACCENT_GREEN), (x + int(w * 0.82), row_y))
-            row_y += int(19 * self.scale)
-        y += roi_h + 12
-
-        # -------------------------------------------------------------
-        # 3. KŘIVKA UČENÍ AI (FITNESS EVOLUTION)
-        # -------------------------------------------------------------
-        ev_h = rect.bottom - y - 14
-        self.screen.blit(self.text_cache.render(self.f_title, "📈 EVOLUCE FITNESU (ADAPTACE)", ACCENT_GREEN), (x, y))
-        y += int(22 * self.scale)
-
-        graph_rect = pygame.Rect(x, y, w, max(40, ev_h - 22))
-        self.draw_card(graph_rect, bg=CARD_BG, border=BORDER_SUBTLE, radius=6)
-
-        hist = state.get("history_avg_fitness", [[] for _ in range(4)])
-        all_v = [val for f_s in hist for val in list(f_s)[-30:]]
-        if not all_v and self.epochs_data:
-            for ep in self.epochs_data[-25:]:
-                for f_idx in range(4):
-                    v = ep.get("factions", [{}])[f_idx].get("fitness_avg", 0.0) if f_idx < len(ep.get("factions", [])) else 0.0
-                    all_v.append(float(v))
-
-        if not all_v:
-            self.screen.blit(self.text_cache.render(self.f_small, "Čekám na odehrání generací...", TEXT_MUTED), (graph_rect.x + 14, graph_rect.centery - 8))
+    def _on_mode_snap(self):
+        if not self.snapshots:
+            self.set_status("V archivu není žádný snapshot pro načtení!", ACCENT_ROSE)
         else:
-            min_v = min(all_v)
-            max_v = max(all_v)
-            span = max(10.0, max_v - min_v)
-            gw = graph_rect.width - 24
-            gh = graph_rect.height - 20
-            gx = graph_rect.x + 12
-            gy = graph_rect.y + 10
+            self.start_from_snapshot = True
+            snap_n = os.path.basename(self.snapshots[self.selected_snapshot_idx])
+            self.set_status(f"Vybrán režim: Ze snapshotu ({snap_n}).", ACCENT_CYAN)
 
-            for f in range(4):
-                f_list = list(hist[f]) if f < len(hist) and hist[f] else []
-                series = f_list[-30:] if f_list else []
-                if not series:
-                    continue
-                col = FACTION_THEMES[f]["color"]
-                if len(series) == 1:
-                    py = int(gy + gh - ((series[0] - min_v) / span) * gh)
-                    pygame.draw.circle(self.screen, col, (gx + gw // 2, py), 4)
-                else:
-                    pts = []
-                    for idx, val in enumerate(series):
-                        px = int(gx + (idx / float(len(series) - 1)) * gw)
-                        py = int(gy + gh - ((val - min_v) / span) * gh)
-                        pts.append((px, max(gy, min(gy + gh, py))))
-                    pygame.draw.lines(self.screen, col, False, pts, 2)
+    def _on_run_lab(self):
+        lab = telemetry_lab.TelemetryLab(telemetry_dir=self.telemetry_dir)
+        if lab.epochs_data:
+            html = lab.generate_html_report()
+            if html and os.path.exists(html):
+                webbrowser.open(os.path.abspath(html))
+            self.set_status("AI Report otevřen v prohlížeči.", ACCENT_GREEN)
+        else:
+            self.set_status("Zatím není dostatek dat pro report.", ACCENT_AMBER)
+
+    def _on_select_scenario(self, scen_idx: int):
+        if self.sim_active:
+            self.set_status("Změna mapy není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+        else:
+            self.selected_scenario = scen_idx
+            self.engine.switch_scenario(self.selected_scenario)
+            self.set_status(f"Nastavena mapa: {scenarios.SCENARIO_NAMES[self.selected_scenario].split('(')[0].strip()}", ACCENT_CYAN)
+
+    def _on_select_units(self, u_idx: int):
+        if self.sim_active:
+            self.set_status("Změna počtu jednotek není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
+        else:
+            self.selected_units_idx = u_idx
+            self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
+            self.set_status(f"Nastaven rozpočet operace: {self.budget_presets[self.selected_units_idx]} b. na frakci.", ACCENT_CYAN)
+
+    def _dispatch_button(self, key: str):
+        exact_handlers = {
+            "refresh": self._on_refresh,
+            "toggle_fps": self._on_toggle_fps,
+            "mode_new": self._on_mode_new,
+            "mode_snap": self._on_mode_snap,
+            "start_continuous": lambda: self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot),
+            "open_preview": self.open_live_preview,
+            "toggle_pause": self.toggle_sim_pause,
+            "stop_sim": lambda: self.stop_simulation(save=True),
+            "tab_radar": lambda: setattr(self, "view_mode", "RADAR"),
+            "tab_heatmap": lambda: setattr(self, "view_mode", "HEATMAP"),
+            "export_csv": self._handle_export_csv,
+            "run_lab": self._on_run_lab,
+            "clean_logs": self._handle_clean_logs,
+        }
+        handler = exact_handlers.get(key)
+        if handler is not None:
+            handler()
+            return
+        if key.startswith("scen_"):
+            self._on_select_scenario(int(key.split("_")[1]))
+        elif key.startswith("units_"):
+            self._on_select_units(int(key.split("_")[1]))
+        elif key.startswith("start_batch_"):
+            self.start_simulation(target_epochs=int(key.split("_")[2]), use_snapshot=self.start_from_snapshot)
+        elif key.startswith("sim_speed_"):
+            self.sim_speed_idx = int(key.split("_")[2])
 
     def handle_click(self, mx: int, my: int):
         try:
@@ -942,67 +633,7 @@ class CyberTacticsLauncher:
 
             for key, rect in list(self.ui_buttons.items()):
                 if rect.collidepoint(mx, my):
-                    if key == "refresh":
-                        self.refresh_telemetry_data()
-                        self.set_status("Data byla obnovena z disku.", ACCENT_CYAN)
-                    elif key == "toggle_fps":
-                        self.target_fps_idx = (self.target_fps_idx + 1) % len(self.target_fps_presets)
-                        target = self.target_fps_presets[self.target_fps_idx]
-                        self.set_status(f"Cílová frekvence GUI přepnuta na {target if target > 0 else 'Bez omezení'} Hz.", ACCENT_AMBER)
-                    elif key.startswith("scen_"):
-                        if self.sim_active:
-                            self.set_status("Změna mapy není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
-                        else:
-                            self.selected_scenario = int(key.split("_")[1])
-                            self.engine.switch_scenario(self.selected_scenario)
-                            self.set_status(f"Nastavena mapa: {scenarios.SCENARIO_NAMES[self.selected_scenario].split('(')[0].strip()}", ACCENT_CYAN)
-                    elif key.startswith("units_"):
-                        if self.sim_active:
-                            self.set_status("Změna počtu jednotek není možná za běhu. Nejprve ukončete simulaci.", ACCENT_AMBER)
-                        else:
-                            self.selected_units_idx = int(key.split("_")[1])
-                            self.engine.configure(self.unit_presets[self.selected_units_idx], 4)
-                            self.set_status(f"Nastaven rozpočet operace: {self.budget_presets[self.selected_units_idx]} b. na frakci.", ACCENT_CYAN)
-                    elif key == "mode_new":
-                        self.start_from_snapshot = False
-                        self.set_status("Vybrán režim: Čistá kampaň (nová evoluce).", ACCENT_GREEN)
-                    elif key == "mode_snap":
-                        if not self.snapshots:
-                            self.set_status("V archivu není žádný snapshot pro načtení!", ACCENT_ROSE)
-                        else:
-                            self.start_from_snapshot = True
-                            snap_n = os.path.basename(self.snapshots[self.selected_snapshot_idx])
-                            self.set_status(f"Vybrán režim: Ze snapshotu ({snap_n}).", ACCENT_CYAN)
-                    elif key == "start_continuous":
-                        self.start_simulation(target_epochs=0, use_snapshot=self.start_from_snapshot)
-                    elif key.startswith("start_batch_"):
-                        n_ep = int(key.split("_")[2])
-                        self.start_simulation(target_epochs=n_ep, use_snapshot=self.start_from_snapshot)
-                    elif key == "open_preview":
-                        self.open_live_preview()
-                    elif key == "toggle_pause":
-                        self.toggle_sim_pause()
-                    elif key == "stop_sim":
-                        self.stop_simulation(save=True)
-                    elif key.startswith("sim_speed_"):
-                        self.sim_speed_idx = int(key.split("_")[2])
-                    elif key == "tab_radar":
-                        self.view_mode = "RADAR"
-                    elif key == "tab_heatmap":
-                        self.view_mode = "HEATMAP"
-                    elif key == "export_csv":
-                        self._handle_export_csv()
-                    elif key == "run_lab":
-                        lab = telemetry_lab.TelemetryLab(telemetry_dir=self.telemetry_dir)
-                        if lab.epochs_data:
-                            html = lab.generate_html_report()
-                            if html and os.path.exists(html):
-                                webbrowser.open(os.path.abspath(html))
-                            self.set_status("AI Report otevřen v prohlížeči.", ACCENT_GREEN)
-                        else:
-                            self.set_status("Zatím není dostatek dat pro report.", ACCENT_AMBER)
-                    elif key == "clean_logs":
-                        self._handle_clean_logs()
+                    self._dispatch_button(key)
                     return
         except Exception as e:
             self.set_status(f"Chyba kliknutí: {e}", ACCENT_ROSE)
@@ -1024,7 +655,8 @@ class CyberTacticsLauncher:
                         os.remove(dest)
                     shutil.move(fp, dest)
                     count += 1
-                except Exception:
+                except OSError:
+                    # Očekávané pokud je soubor uzamčen běžícím procesem
                     pass
         self.epochs_data.clear()
         self.heatmap_grid.fill(0)

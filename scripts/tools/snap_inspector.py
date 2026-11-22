@@ -5,7 +5,6 @@ scripts/tools/snap_inspector.py - CLI inspektor uložených .pt snapshotů z tel
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,7 +13,12 @@ import torch
 
 
 def _load_pt_cpu(path: Path) -> dict[str, Any]:
-    return torch.load(str(path), map_location="cpu", weights_only=False)
+    from collections import deque
+    try:
+        with torch.serialization.safe_globals([deque]):
+            return torch.load(str(path), map_location="cpu", weights_only=True)
+    except Exception:
+        return torch.load(str(path), map_location="cpu", weights_only=False)
 
 
 def _tensor_health(t: torch.Tensor) -> dict[str, Any]:

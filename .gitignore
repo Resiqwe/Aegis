@@ -18,6 +18,10 @@ run_headless.py.log
 .venv/
 __pycache__/
 *.pyc
+.ruff_cache/
+.pytest_cache/
+devtools/logs/*.csv
+devtools/logs/*_report.md
 *.safetensors
 *.pth
 *.bin

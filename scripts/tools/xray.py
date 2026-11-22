@@ -15,7 +15,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,21 @@ from typing import Any
 EXCLUDED_PARTS = {"archive", ".venv", "venv", "__pycache__", ".idea", ".git", "scripts", "telemetry", "docs", "plany"}
 GPU_SYNC_ATTRS = {"item", "cpu", "numpy", "tolist", "any", "all"}
 HOT_PATH_PREFIXES = ("src/engine_core.py", "src/engine/")
+
+CORE_HOT_LOOP_FILES = {
+    "src/engine_core.py",
+    "src/engine/sensors_system.py",
+    "src/engine/combat_system.py",
+    "src/engine/locomotion_system.py",
+    "src/engine/objectives_system.py",
+    "src/engine/ballistics_system.py",
+    "src/engine/spatial_system.py",
+}
+
+COLD_EXEMPT_FUNCS = {
+    "update_gates",
+    "check_battle_status",
+}
 
 
 def _iter_active_py_files(root: Path) -> list[tuple[str, Path]]:
@@ -283,6 +297,7 @@ def run_xray(
     deps_class: str | None = None,
     strict: bool = False,
     strict_all: bool = False,
+    show_silent: bool = False,
 ) -> int:
     files = _iter_active_py_files(root)
 
@@ -371,10 +386,15 @@ def run_xray(
         f401 = _check_f401_ast(files, parsed)
 
     hot_loop_syncs = [g for g in gpu_syncs if g["hot_loop_sync"]]
-    core_hot_loop_syncs = [
-        g for g in hot_loop_syncs
-        if g["file"] == "src/engine_core.py" and g["func"] in ("_step_internal", "_atomic_commit_pipeline")
-    ]
+    core_hot_loop_syncs = []
+    for g in hot_loop_syncs:
+        if g["file"] == "src/engine_core.py":
+            if g["func"] in ("_step_internal", "_atomic_commit_pipeline"):
+                core_hot_loop_syncs.append(g)
+        elif g["file"] in CORE_HOT_LOOP_FILES:
+            if g["func"] not in COLD_EXEMPT_FUNCS:
+                core_hot_loop_syncs.append(g)
+
     top_funcs = sorted(funcs_info, key=lambda x: (x["loc"], x["cc"]), reverse=True)[:8]
 
     report = {
@@ -418,6 +438,11 @@ def run_xray(
             print("UNUSED_IMPORTS (F401):")
             for u in f401[:10]:
                 print(f"  {u['file']}:{u['line']} {u['symbol']}")
+
+        if silent_excepts and (show_silent or not compact):
+            print("SILENT_EXCEPTS:")
+            for se in silent_excepts:
+                print(f"  {se['file']}:{se['line']}")
 
         by_file_locks: dict[str, list[str]] = defaultdict(list)
         for lk in locks:

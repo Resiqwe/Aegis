@@ -39,57 +39,17 @@ import pygame
 
 from src.scenarios import SCENARIO_NAMES
 from src.engine_core import RealisticBattleEngine, DOCTRINE_LIST
-from src.ai_brains import CLASS_MEDIC
 from src.telemetry_logger import TelemetryManager
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
 import battlefield_renderer as bf_render
 from src.profiler import render_prof
-
-FACTION_META = [
-    {"name": "ALPHA VANGUARD", "short": "ALPHA", "color": (0, 240, 210)},
-    {"name": "OMEGA SYNDICATE", "short": "OMEGA", "color": (255, 45, 115)},
-    {"name": "SOLAR CORE", "short": "SOLAR", "color": (255, 195, 25)},
-    {"name": "PHANTOM UNIT", "short": "PHANTOM", "color": (175, 80, 250)},
-]
-
-BG_DARK = (11, 14, 21)
-PANEL_BG = (16, 21, 31)
-PANEL_HEADER = (24, 32, 46)
-BORDER_COL = (42, 56, 80)
-ACCENT_CYAN = (0, 240, 210)
-ACCENT_AMBER = (255, 195, 25)
-ACCENT_GREEN = (65, 235, 100)
-ACCENT_PINK = (255, 45, 120)
-TEXT_MAIN = (235, 242, 250)
-TEXT_DIM = (145, 160, 185)
-
-
-def safe_rgb(col, default=(200, 200, 200)) -> tuple[int, int, int]:
-    try:
-        return (
-            max(0, min(255, int(col[0]))),
-            max(0, min(255, int(col[1]))),
-            max(0, min(255, int(col[2]))),
-        )
-    except Exception:
-        return default
-
-
-class ModernTextCache:
-    """Blesková textová cache pro HUD: eliminuje 95 % CPU zátěže z font.render."""
-    def __init__(self):
-        self._cache = {}
-
-    def render(self, font: pygame.font.Font, text: str, color: tuple) -> pygame.Surface:
-        key = (id(font), text, color)
-        surf = self._cache.get(key)
-        if surf is None:
-            surf = font.render(text, True, color)
-            if len(self._cache) > 2500:
-                self._cache.clear()
-            self._cache[key] = surf
-        return surf
+from src.ui.widgets import (
+    FACTION_META, BG_DARK, PANEL_BG, BORDER_COL,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_PINK, TEXT_DIM,
+    ModernTextCache, draw_hud_button as _draw_hud_button,
+)
+from src.ui.hud_inspector import draw_right_dock as _draw_right_dock
 
 
 class OptimizedTacticalHUD:
@@ -373,100 +333,94 @@ class OptimizedTacticalHUD:
                 return True
         return False
 
+    def _on_next_epoch(self):
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("force_evolve")
+        else:
+            self.engine.finish_operation_and_evolve()
+        self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
+
+    def _on_cycle_scenario(self):
+        next_scen = (self.engine.current_scenario_idx + 1) % 3
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("switch_scenario", next_scen)
+        else:
+            self.engine.switch_scenario(next_scen)
+        scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
+        self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
+
+    def _on_save_snap(self):
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("save_snapshot")
+            self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
+        else:
+            path = self.telemetry.save_snapshot(self.engine)
+            self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
+
+    def _on_load_snap(self):
+        snaps = self.telemetry.list_available_snapshots()
+        if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
+            self.show_banner(f"[NACIST] Načten model: {os.path.basename(snaps[0])}", 3.0)
+        else:
+            self.show_banner("[VAROVANI] Žádný snapshot k načtení nenalezen!", 3.0)
+
+    def _on_cycle_doctrine(self, f_id: int):
+        new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
+        if hasattr(self, "worker") and self.worker is not None:
+            self.worker.post_command("set_doctrine", f_id, new_doc)
+        else:
+            self.engine.set_faction_doctrine(f_id, new_doc)
+        doc_name = DOCTRINE_LIST[new_doc]
+        doc_desc = {
+            "BALANCED": "Vyvážený taktický postup a obsazování",
+            "RUSH": "Agresivní útok na střed a rychlý střet",
+            "HOLD": "Obranná formace a držení klíčových pozic",
+            "SKIRMISH": "Průzkum, odstup a dálkové ostřelování",
+        }.get(doc_name, "")
+        f_name = FACTION_META[f_id]["name"]
+        self.show_banner(f"[DOKTRINA] {f_name}: Doktrína přepnuta na [{doc_name}] - {doc_desc}", 3.5)
+
     def _trigger_button(self, key: str):
         self._btn_flash[key] = time.perf_counter()
-        if key == "back_menu":
-            pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
-        elif key == "play_pause":
-            self.running = not self.running
-            self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0)
-        elif key == "next_epoch":
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("force_evolve")
-            else:
-                self.engine.finish_operation_and_evolve()
-            self.show_banner(f"Epocha #{self.engine.current_epoch:02d}: Požadavek na novou epochu odeslán", 3.0)
-        elif key.startswith("speed_"):
+        exact_handlers = {
+            "back_menu": lambda: pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE)),
+            "play_pause": lambda: (
+                setattr(self, "running", not self.running),
+                self.show_banner("[PLAY] SIMULACE BĚŽÍ" if self.running else "[PAUZA] SIMULACE POZASTAVENA", 2.0),
+            ),
+            "next_epoch": self._on_next_epoch,
+            "toggle_follow": lambda: (
+                setattr(self, "follow_selected", not self.follow_selected),
+                self.show_banner("Sledování kamery: " + ("ZAPNUTO [Kamera sleduje cíl]" if self.follow_selected else "VYPNUTO [Volná kamera]"), 2.0),
+            ),
+            "cycle_speed": lambda: (
+                setattr(self, "speed_idx", (self.speed_idx + 1) % len(self.speed_presets)),
+                self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0),
+            ),
+            "cycle_scenario": self._on_cycle_scenario,
+            "cycle_units": lambda: (
+                setattr(self, "unit_preset_idx", (self.unit_preset_idx + 1) % len(self.unit_presets)),
+                self.reboot_simulation(),
+                self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0),
+            ),
+            "save_snap": self._on_save_snap,
+            "load_snap": self._on_load_snap,
+        }
+        handler = exact_handlers.get(key)
+        if handler is not None:
+            handler()
+            return
+        if key.startswith("speed_"):
             self.speed_idx = int(key.split("_")[1])
             self.show_banner(f"[BLESK] Rychlost simulace nastavena: {self.speed_presets[self.speed_idx]:g}x", 2.0)
-        elif key == "toggle_follow":
-            self.follow_selected = not self.follow_selected
-            self.show_banner("Sledování kamery: " + ("ZAPNUTO [Kamera sleduje cíl]" if self.follow_selected else "VYPNUTO [Volná kamera]"), 2.0)
-        elif key == "cycle_speed":
-            self.speed_idx = (self.speed_idx + 1) % len(self.speed_presets)
-            self.show_banner(f"[BLESK] Rychlost: {self.speed_presets[self.speed_idx]:g}x", 2.0)
-        elif key == "cycle_scenario":
-            next_scen = (self.engine.current_scenario_idx + 1) % 3
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("switch_scenario", next_scen)
-            else:
-                self.engine.switch_scenario(next_scen)
-            scen_name = SCENARIO_NAMES[next_scen].split('(')[0].strip()
-            self.show_banner(f"[MAPA] Scénář přepnut: {scen_name}", 3.0)
-        elif key == "cycle_units":
-            self.unit_preset_idx = (self.unit_preset_idx + 1) % len(self.unit_presets)
-            self.reboot_simulation()
-            self.show_banner(f"Rozpočet kampaně přenastaven ({self.engine.budget_per_faction}b / frakce)", 3.0)
-        elif key == "save_snap":
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("save_snapshot")
-                self.show_banner("Ukládání snapshotu na pozadí...", 1.5)
-            else:
-                path = self.telemetry.save_snapshot(self.engine)
-                self.show_banner(f"[ULOZIT] Uložen model: {os.path.basename(path)}", 3.0)
-        elif key == "load_snap":
-            snaps = self.telemetry.list_available_snapshots()
-            if snaps and self.telemetry.load_snapshot(self.engine, snaps[0]):
-                self.show_banner(f"[NACIST] Načten model: {os.path.basename(snaps[0])}", 3.0)
-            else:
-                self.show_banner("[VAROVANI] Žádný snapshot k načtení nenalezen!", 3.0)
         elif key.startswith("doc_"):
-            f_id = int(key.split("_")[1])
-            new_doc = (self.engine.faction_doctrines[f_id] + 1) % 4
-            if hasattr(self, "worker") and self.worker is not None:
-                self.worker.post_command("set_doctrine", f_id, new_doc)
-            else:
-                self.engine.set_faction_doctrine(f_id, new_doc)
-            doc_name = DOCTRINE_LIST[new_doc]
-            doc_desc = {
-                "BALANCED": "Vyvážený taktický postup a obsazování",
-                "RUSH": "Agresivní útok na střed a rychlý střet",
-                "HOLD": "Obranná formace a držení klíčových pozic",
-                "SKIRMISH": "Průzkum, odstup a dálkové ostřelování"
-            }.get(doc_name, "")
-            f_name = FACTION_META[f_id]['name']
-            self.show_banner(f"[DOKTRINA] {f_name}: Doktrína přepnuta na [{doc_name}] - {doc_desc}", 3.5)
+            self._on_cycle_doctrine(int(key.split("_")[1]))
 
     def draw_button(self, surf, key: str, rect: pygame.Rect, label: str, active: bool = False, accent=ACCENT_CYAN):
-        self.ui_buttons[key] = rect
-        mx, my = pygame.mouse.get_pos()
-        hover = rect.collidepoint(mx, my)
-
-        acc = safe_rgb(accent)
-        # Efekt stisku tlačítka (flash 140 ms po kliknutí)
-        is_flash = (time.perf_counter() - self._btn_flash.get(key, 0.0)) < 0.14
-
-        if is_flash:
-            bg = (min(255, int(acc[0] * 0.55 + 50)), min(255, int(acc[1] * 0.55 + 50)), min(255, int(acc[2] * 0.55 + 50)))
-            border = (255, 255, 255)
-            txt_col = (255, 255, 255)
-        elif active:
-            bg = (int(acc[0] * 0.25), int(acc[1] * 0.25), int(acc[2] * 0.25))
-            border = acc
-            txt_col = acc
-        elif hover:
-            bg = (34, 46, 66)
-            border = (140, 180, 230)
-            txt_col = TEXT_MAIN
-        else:
-            bg = (18, 24, 34)
-            border = BORDER_COL
-            txt_col = TEXT_DIM
-
-        pygame.draw.rect(surf, bg, rect, border_radius=4)
-        pygame.draw.rect(surf, border, rect, width=1 if not (active or is_flash) else 2, border_radius=4)
-        txt = self.text_cache.render(self.f_small, label, txt_col)
-        surf.blit(txt, (rect.x + (rect.width - txt.get_width()) // 2, rect.y + (rect.height - txt.get_height()) // 2))
+        _draw_hud_button(
+            surf, self.ui_buttons, self._btn_flash, self.text_cache, self.f_small,
+            key=key, rect=rect, label=label, active=active, accent=accent,
+        )
 
     def render_battlefield(self, state: dict, unit_info: dict | None):
         vr = self.viewport_rect
@@ -559,7 +513,7 @@ class OptimizedTacticalHUD:
         dock_rect = pygame.Rect(vp_w + 14, top_h + 6, dock_w - 4, vp_h)
 
         t_ui0 = time.perf_counter()
-        self._draw_top_bar(W, top_h)
+        self._draw_top_bar(W, top_h, state)
         t_ui1 = time.perf_counter()
 
         t_world0 = time.perf_counter()
@@ -578,12 +532,13 @@ class OptimizedTacticalHUD:
         t_flip1 = time.perf_counter()
         render_prof.record("flip_ms", (t_flip1 - t_flip0) * 1000.0)
 
-    def _draw_top_bar(self, W: int, top_h: int):
+    def _draw_top_bar(self, W: int, top_h: int, state: dict | None = None):
         pygame.draw.rect(self.screen, PANEL_BG, (0, 0, W, top_h))
         pygame.draw.line(self.screen, BORDER_COL, (0, top_h - 1), (W, top_h - 1), 1)
 
-        sec = int(self.engine.operation_time_sec)
-        rem_sec = max(0, int(self.engine.MAX_OPERATION_DURATION - self.engine.operation_time_sec))
+        op_time = float(state.get("operation_time_sec", 0.0)) if state is not None else float(self.engine.operation_time_sec)
+        sec = int(op_time)
+        rem_sec = max(0, int(self.engine.MAX_OPERATION_DURATION - op_time))
         time_str = f"{sec // 60:02d}:{sec % 60:02d} (Do evoluce: {rem_sec:02d}s)"
 
         # 1. Levá zóna: Kompaktní informační panel
@@ -691,331 +646,7 @@ class OptimizedTacticalHUD:
                 pygame.draw.lines(self.screen, col, False, pts, 2)
 
     def _draw_right_dock(self, rect: pygame.Rect, unit_info: dict | None, state: dict):
-        pygame.draw.rect(self.screen, PANEL_BG, rect, border_radius=5)
-        pygame.draw.rect(self.screen, BORDER_COL, rect, width=1, border_radius=5)
-
-        pad = 8
-        x = rect.x + pad
-        w = rect.width - 2 * pad
-        y = rect.y + pad
-
-        # ==========================================
-        # 1. VOJENSKÁ KAMPAŇ, VELITELÉ & ROI UČENÍ
-        # ==========================================
-        hdr_h = max(22, int(22 * self.ui_scale))
-        pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
-        self.screen.blit(self.text_cache.render(self.f_sub, "1. FRAKCE, GENERÁLOVÉ (ROI) & DOKTRÍNY", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
-        y += hdr_h + 3
-
-        alive_counts = state.get("alive_counts", [0, 0, 0, 0])
-        kills = state.get("kills_by_faction", getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0]))
-        wins = getattr(self.engine, "epoch_wins_per_faction", [0, 0, 0, 0])
-        total_alive = max(1, sum(alive_counts))
-
-        # Tug-of-war barevný pruh poměru sil
-        bar_h = 6
-        cur_bx = x
-        for f in range(self.engine.n_factions):
-            seg_w = int((alive_counts[f] / total_alive) * w)
-            if seg_w > 0:
-                pygame.draw.rect(self.screen, FACTION_META[f]["color"], (cur_bx, y, seg_w, bar_h))
-                cur_bx += seg_w
-        pygame.draw.rect(self.screen, BORDER_COL, (x, y, w, bar_h), width=1)
-        y += 9
-
-        generals_info = state.get("generals", [])
-        for f in range(self.engine.n_factions):
-            f_col = FACTION_META[f]["color"]
-            f_alive = alive_counts[f]
-            init_c = max(1, self.engine.initial_team_counts[f] if f < len(self.engine.initial_team_counts) else 100)
-            eff_pct = int((f_alive / init_c) * 100)
-
-            gen = generals_info[f] if f < len(generals_info) else {}
-            lvl = gen.get("level", 0)
-            xp = gen.get("xp", 0.0)
-            comp = gen.get("composition", [100, 0, 0, 0])
-            probs = gen.get("probs", [1.0, 0.0, 0.0, 0.0])
-
-            row_h = max(56, int(58 * self.ui_scale))
-            row = pygame.Rect(x, y, w, row_h)
-            pygame.draw.rect(self.screen, (20, 26, 38), row, border_radius=4)
-            pygame.draw.rect(self.screen, BORDER_COL, row, width=1, border_radius=4)
-            pygame.draw.rect(self.screen, f_col, (x, y, 4, row_h), border_radius=2)
-
-            # Doctrine button na pravé straně s vertikálním vycentrováním
-            doc_btn_w = max(74, int(80 * self.ui_scale))
-            doc_btn_h = max(26, int(28 * self.ui_scale))
-            doc_btn_y = y + (row_h - doc_btn_h) // 2
-            cur_doc = self.engine.faction_doctrines[f]
-            d_name = DOCTRINE_LIST[cur_doc]
-            doc_colors = [
-                (140, 155, 175),   # BALANCED (neutrální ocelová)
-                (255, 75, 75),     # RUSH (agresivní červená)
-                (60, 160, 255),    # HOLD (obranná modrá)
-                (200, 100, 255),   # SKIRMISH (taktická fialová)
-            ]
-            doc_accent = doc_colors[cur_doc]
-            self.draw_button(
-                self.screen,
-                f"doc_{f}",
-                pygame.Rect(x + w - doc_btn_w - 6, doc_btn_y, doc_btn_w, doc_btn_h),
-                d_name,
-                active=True,
-                accent=doc_accent,
-            )
-
-            # Texty s čistým vertikálním a horizontálním paddingem
-            k_val = kills[f] if f < len(kills) else 0
-            w_val = wins[f] if f < len(wins) else 0
-            t_line1 = f"{FACTION_META[f]['short']} L{lvl} W:{w_val} | Síla: {eff_pct}% ({f_alive}) | K: {k_val}"
-            self.screen.blit(self.text_cache.render(self.f_small, t_line1, f_col if eff_pct > 22 else (230, 50, 50)), (x + 12, y + 6))
-
-            # Aktivní Power-Upy frakce
-            f_techs = state.get("faction_techs", [[] for _ in range(4)])
-            tech_tags = []
-            if f < len(f_techs):
-                tag_map = {0: "NANIT", 1: "RADAR", 2: "ŠTÍT", 3: "OVERCLOCK", 4: "AEROSOL"}
-                for tid in f_techs[f]:
-                    tech_tags.append(tag_map.get(tid, f"T{tid}"))
-            tech_str = (" [" + "][".join(tech_tags) + "]") if tech_tags else " [BEZ TECH]"
-
-            comp_txt = (
-                f"P:{comp[0]} M:{comp[1]} S:{comp[2]} J:{comp[3]}  •  "
-                f"Váhy: {int(probs[0]*100)}/{int(probs[1]*100)}/{int(probs[2]*100)}/{int(probs[3]*100)}%"
-            )
-            self.screen.blit(self.text_cache.render(self.f_tiny, comp_txt, TEXT_DIM), (x + 12, y + 24))
-            t_tech_surf = self.text_cache.render(self.f_tiny, f"TECH:{tech_str}", ACCENT_AMBER if tech_tags else TEXT_DIM)
-            self.screen.blit(t_tech_surf, (x + 12, y + 38))
-
-            y += row_h + 4
-
-        y += 3
-        # ==========================================
-        # 2. KŘIVKA UČENÍ AI + BOJOVÝ PROTOKOL UDÁLOSTÍ
-        # ==========================================
-        pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
-        self.screen.blit(self.text_cache.render(self.f_sub, "2. VÝVOJ UČENÍ (FITNESS) & PROTOKOL", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
-        y += hdr_h + 3
-
-        mid_h = max(92, int(96 * self.ui_scale))
-        graph_w = int(w * 0.46)
-        feed_w = w - graph_w - 6
-
-        self._draw_fitness_graph(pygame.Rect(x, y, graph_w, mid_h), state)
-
-        feed_rect = pygame.Rect(x + graph_w + 6, y, feed_w, mid_h)
-        pygame.draw.rect(self.screen, (13, 17, 25), feed_rect, border_radius=3)
-        pygame.draw.rect(self.screen, BORDER_COL, feed_rect, width=1, border_radius=3)
-
-        events = state.get("events", [])
-        ey = y + 4
-        ev_step = max(16, int(17 * self.ui_scale))
-        for ev in events[-5:]:
-            e_col = FACTION_META[ev["team"]]["color"] if 0 <= ev["team"] < 4 else ACCENT_AMBER
-            ev_txt = ev["text"]
-            if len(ev_txt) > 28:
-                ev_txt = ev_txt[:26] + ".."
-            self.screen.blit(self.text_cache.render(self.f_tiny, ev_txt, e_col), (feed_rect.x + 6, ey))
-            ey += ev_step
-        y += mid_h + 8
-
-        # ==========================================
-        # 3. KOMPLETNÍ RENTGEN NEURONOVÉ SÍTĚ VOJÁKA (14 -> 28 -> 4)
-        # ==========================================
-        pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, hdr_h), border_radius=3)
-        lbl_mode = "MANUÁL" if self.selected_unit >= 0 else "AUTO-ELITA"
-        self.screen.blit(self.text_cache.render(self.f_sub, f"3. HIERARCHICKÝ MOZEK (14->24->16->7) // {lbl_mode}", ACCENT_CYAN), (x + 8, y + max(2, (hdr_h - self.f_sub.get_height()) // 2)))
-        y += hdr_h + 3
-
-        sens_step = max(13, int(14 * self.ui_scale))
-        act_step = max(16, int(18 * self.ui_scale))
-        insp_h = max(260, int(48 + 14 * sens_step + 12))
-        insp_rect = pygame.Rect(x, y, w, insp_h)
-        pygame.draw.rect(self.screen, (13, 17, 25), insp_rect, border_radius=4)
-        pygame.draw.rect(self.screen, BORDER_COL, insp_rect, width=1, border_radius=4)
-
-        if unit_info is None:
-            msg = self.text_cache.render(self.f_reg, "Žádná jednotka není aktivní.", TEXT_DIM)
-            self.screen.blit(msg, (x + 14, y + 30))
-            return
-
-        f_id = unit_info["team"]
-        f_col = FACTION_META[f_id]["color"]
-        u_title = (
-            f"VOJÁK #{unit_info['unit_idx']:03d} (Slot #{unit_info.get('brain_slot', 0):03d}) "
-            f"[{FACTION_META[f_id]['short']}] • {unit_info['class_name']}"
-        )
-        self.screen.blit(self.text_cache.render(self.f_small, u_title, f_col), (x + 8, y + 4))
-
-        st_parts = []
-        if unit_info.get("unit_state_name"):
-            st_parts.append(f"[{unit_info['unit_state_name']}]")
-        if unit_info["in_cover"]:
-            st_parts.append("[KRYT]")
-        if unit_info["reloading"]:
-            st_parts.append("[PŘEBÍJÍ]")
-        if unit_info["suppression"] > 0.3:
-            st_parts.append("[POTLAČEN]")
-        status_lbl = " ".join(st_parts) if st_parts else "[AKTIVNÍ]"
-        stat_color = ACCENT_AMBER if st_parts else TEXT_DIM
-
-        fit_val = unit_info.get("fitness", 0.0)
-        dmg_dealt = unit_info.get("damage_dealt", 0.0)
-        dmg_taken = unit_info.get("damage_taken", 0.0)
-        heal_done = unit_info.get("healing_done", 0.0)
-        heal_str = f" Heal:{heal_done:.0f}" if heal_done > 0 else ""
-
-        u_stats1 = (
-            f"HP:{unit_info['hp']:.0f}/{unit_info['max_hp']:.0f} | "
-            f"Zás:{unit_info['ammo']:.0f}/{unit_info['max_ammo']:.0f} | "
-            f"Fit:{fit_val:.1f}  {status_lbl}"
-        )
-        self.screen.blit(self.text_cache.render(self.f_tiny, u_stats1, stat_color), (x + 8, y + 19))
-
-        u_stats2 = f"Kills:{unit_info.get('kills', 0)} | Dmg:{dmg_dealt:.0f} | Utrž:{dmg_taken:.0f}{heal_str}"
-        self.screen.blit(self.text_cache.render(self.f_tiny, u_stats2, TEXT_DIM), (x + 8, y + 33))
-
-        df = unit_info["decision_flow"]
-        col_w = (w - 14) // 2
-        col_y_start = y + 48
-
-        # Všech 14 senzorů v levém sloupci (Egocentrické tělesné vnímání)
-        self.screen.blit(self.text_cache.render(self.f_small, "VSTUPNÍ SENZORY (14)", ACCENT_CYAN), (x + 6, col_y_start))
-        
-        SHORT_SENSORS = [
-            "1.Cíl Vpřed", "2.Cíl Vpravo", "3.Blízkost",
-            "4.Palba Vpř.", "5.Palba Vpr.",
-            "6.Povel Vpř.", "7.Povel Vpr.",
-            "8.Potlačení", "9.Zásobník", "10.Zdraví(HP)",
-            "11.Kryt Vpř.", "12.Kryt Vpr.",
-            "13.Koheze čety", "14.Stav zóny"
-        ]
-
-        bar_w = max(42, int(48 * self.ui_scale))
-        for i, (name, val) in enumerate(df["sensors"][:14]):
-            ry = col_y_start + 16 + i * sens_step
-            s_name = SHORT_SENSORS[i] if i < len(SHORT_SENSORS) else name[:12]
-            self.screen.blit(self.text_cache.render(self.f_tiny, s_name, TEXT_DIM), (x + 6, ry))
-            
-            bx = x + col_w - bar_w - 4
-            pygame.draw.rect(self.screen, (24, 32, 46), (bx, ry + 1, bar_w, 8), border_radius=2)
-            half_b = bar_w // 2
-            w_b = int(min(1.0, abs(val)) * (half_b - 1))
-            c_b = ACCENT_CYAN if val >= 0 else ACCENT_PINK
-            if val >= 0:
-                pygame.draw.rect(self.screen, c_b, (bx + half_b, ry + 1, w_b, 8), border_radius=2)
-            else:
-                pygame.draw.rect(self.screen, c_b, (bx + half_b - w_b, ry + 1, w_b, 8), border_radius=2)
-
-        # Pravý sloupec: 4 výstupní akce + 28 skrytých neuronů
-        rx = x + col_w + 10
-        self.screen.blit(self.text_cache.render(self.f_small, "VÝSTUPNÍ AKCE (7)", ACCENT_GREEN), (rx + 4, col_y_start))
-        
-        SHORT_ACTIONS = [
-            "1.Surge(Plyn)", "2.Sway(Úkrok)", "3.Yaw(Míření)", "4.Trigger(Palba)",
-            "5.Stance(Sprint)", "6.Ability(Doved.)", "7.Ping(Četa)"
-        ]
-
-        act_step_7 = max(12, int(13 * self.ui_scale))
-        for i, (name, val) in enumerate(df["actions"][:7]):
-            ry = col_y_start + 15 + i * act_step_7
-            a_name = SHORT_ACTIONS[i] if i < len(SHORT_ACTIONS) else name[:12]
-            self.screen.blit(self.text_cache.render(self.f_tiny, a_name, TEXT_MAIN if abs(val) > 0.20 else TEXT_DIM), (rx + 4, ry))
-            
-            bx = rx + col_w - bar_w - 4
-            pygame.draw.rect(self.screen, (24, 32, 46), (bx, ry + 1, bar_w, 7), border_radius=2)
-            half_b = bar_w // 2
-            w_b = int(min(1.0, abs(val)) * (half_b - 1))
-            c_b = ACCENT_GREEN if val >= 0 else ACCENT_AMBER
-            if val >= 0:
-                pygame.draw.rect(self.screen, c_b, (bx + half_b, ry + 1, w_b, 7), border_radius=2)
-            else:
-                pygame.draw.rect(self.screen, c_b, (bx + half_b - w_b, ry + 1, w_b, 7), border_radius=2)
-
-        # Dvouvrstvá hierarchická reprezentace: H1 (Percepce 24n) + H2 (Taktika 16n) = 40 neuronů
-        hy = col_y_start + 15 + 7 * act_step_7 + 8
-        self.screen.blit(self.text_cache.render(self.f_tiny, "H1: PERCEPCE PROSTORU (24 NEURONŮ // 2x12)", ACCENT_CYAN), (rx + 4, hy))
-        h1_vals = df.get("hidden_h1", df.get("hidden", [])[:24])
-        n_cols = 12
-        cell_gap = 2
-        cell_w = max(6, (col_w - (n_cols - 1) * cell_gap - 8) // n_cols)
-        cell_h = max(6, int(6.5 * self.ui_scale))
-
-        for idx, h_val in enumerate(h1_vals[:24]):
-            r_idx = idx // n_cols
-            c_idx = idx % n_cols
-            cx = rx + 4 + c_idx * (cell_w + cell_gap)
-            cy = hy + 14 + r_idx * (cell_h + cell_gap)
-            val_clamped = 0.0 if (math.isnan(h_val) or math.isinf(h_val)) else max(0.0, min(1.0, abs(h_val)))
-            inten = int(val_clamped * 200)
-            col_h = (20, min(255, 45 + inten), 200) if h_val >= 0 else (min(255, 50 + inten), 25, 90)
-            pygame.draw.rect(self.screen, col_h, (cx, cy, cell_w, cell_h), border_radius=1)
-            pygame.draw.rect(self.screen, BORDER_COL, (cx, cy, cell_w, cell_h), width=1, border_radius=1)
-
-        # Vrstva H2: Taktická syntéza
-        h1_rows = (min(len(h1_vals), 24) + n_cols - 1) // n_cols if h1_vals else 2
-        h2_y = hy + 14 + max(2, h1_rows) * (cell_h + cell_gap) + 6
-        self.screen.blit(self.text_cache.render(self.f_tiny, "H2: TAKTICKÁ SYNTÉZA (16 NEURONŮ // 2x8)", ACCENT_AMBER), (rx + 4, h2_y))
-        h2_vals = df.get("hidden_h2", df.get("hidden", [])[24:40])
-        n_cols_h2 = 8
-        cell_w_h2 = max(6, (col_w - (n_cols_h2 - 1) * cell_gap - 8) // n_cols_h2)
-        for idx, h_val in enumerate(h2_vals[:16]):
-            r_idx = idx // n_cols_h2
-            c_idx = idx % n_cols_h2
-            cx = rx + 4 + c_idx * (cell_w_h2 + cell_gap)
-            cy = h2_y + 14 + r_idx * (cell_h + cell_gap)
-            val_clamped = 0.0 if (math.isnan(h_val) or math.isinf(h_val)) else max(0.0, min(1.0, abs(h_val)))
-            inten = int(val_clamped * 200)
-            col_h = (min(255, 30 + inten), min(255, 140 + inten // 2), 255) if h_val >= 0 else (min(255, 180 + inten // 3), 40, 70)
-            pygame.draw.rect(self.screen, col_h, (cx, cy, cell_w_h2, cell_h), border_radius=1)
-            pygame.draw.rect(self.screen, BORDER_COL, (cx, cy, cell_w_h2, cell_h), width=1, border_radius=1)
-
-        y += insp_h + 8
-
-        # ==========================================
-        # 4. ŽIVÁ EKONOMIKA TŘÍD (ROI) & STATISTIKA BITVY (Využití prostoru)
-        # ==========================================
-        sec4_h = rect.bottom - y - 4
-        if sec4_h >= 110:
-            pygame.draw.rect(self.screen, PANEL_HEADER, (x, y, w, 22), border_radius=3)
-            self.screen.blit(self.text_cache.render(self.f_sub, "4. EKONOMIKA TŘÍD (ROI) & STATISTIKY BOJE", ACCENT_CYAN), (x + 8, y + 4))
-            y += 24
-
-            sec4_rect = pygame.Rect(x, y, w, sec4_h - 24)
-            pygame.draw.rect(self.screen, (13, 17, 25), sec4_rect, border_radius=4)
-            pygame.draw.rect(self.screen, BORDER_COL, sec4_rect, width=1, border_radius=4)
-
-            # Tabulka ROI tříd za tuto bitvu
-            th_y = y + 5
-            self.screen.blit(self.text_cache.render(self.f_mono, "TŘÍDA       CENA   ŽIVÝCH    UDĚLENO  UTRŽENO  KILLS   ROI/1b", ACCENT_AMBER), (x + 10, th_y))
-
-            class_colors = [(74, 144, 226), (65, 235, 100), (255, 195, 25), (231, 76, 60)]
-            stats = state.get("live_class_stats", [])
-            for i, cs in enumerate(stats):
-                ry = th_y + 18 + i * 17
-                c_col = class_colors[i % len(class_colors)]
-                c_name = cs["name"]
-                c_cost = cs["cost"]
-                c_al = cs["alive"]
-                c_tot = cs["total"]
-                c_dmg = cs["damage"]
-                c_taken = cs["damage_taken"]
-                c_k = cs["kills"]
-                c_roi = cs["roi"]
-
-                extra_txt = ""
-                if cs["class_id"] == CLASS_MEDIC and cs["healing"] > 0:
-                    extra_txt = f" +{cs['healing']:.0f}H"
-
-                row_txt = f"{c_name:<11} {c_cost} b   {c_al:2d}/{c_tot:2d}    {c_dmg:6.0f}   {c_taken:6.0f}    {c_k:2d}    {c_roi:5.1f}{extra_txt}"
-                self.screen.blit(self.text_cache.render(self.f_mono, row_txt, c_col), (x + 10, ry))
-
-            # Strategické body uzlů
-            node_pts = state.get("node_points", [0.0, 0.0, 0.0, 0.0])
-            bottom_y = sec4_rect.bottom - 17
-            if bottom_y > th_y + 16 + 4 * 17 + 4:
-                pts_str = f"Uzly (body): ALPHA:{node_pts[0]:.0f} | OMEGA:{node_pts[1]:.0f} | SOLAR:{node_pts[2]:.0f} | PHANTOM:{node_pts[3]:.0f}"
-                self.screen.blit(self.f_tiny.render(pts_str, True, TEXT_DIM), (x + 8, bottom_y))
+        _draw_right_dock(self, rect, unit_info, state)
 
     def run(self):
         while True:
@@ -1087,7 +718,7 @@ class OptimizedTacticalHUD:
 
         if getattr(self, "_owns_worker", True):
             self.worker.stop()
-        if hasattr(self.telemetry, "shutdown"):
+        if not self.embedded and hasattr(self.telemetry, "shutdown"):
             self.telemetry.shutdown(wait=True)
         self.telemetry.flush_spatial_parquet()
         if not self.embedded:
