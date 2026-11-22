@@ -1,0 +1,41 @@
+diff --git a/scripts/tools/perf_runner.py b/scripts/tools/perf_runner.py
+index 8619c4f..4ceaeb4 100644
+--- a/scripts/tools/perf_runner.py
++++ b/scripts/tools/perf_runner.py
+@@ -172,8 +172,8 @@ def run_profile(
+     orig_step_internal = engine._step_internal
+     orig_spatial_col = engine.spatial.resolve_obstacle_collisions
+     orig_los = spatial_system.check_line_of_sight
+-    orig_los_sensors = sensors_system.check_line_of_sight
+-    orig_los_core = engine_core.check_line_of_sight
++    orig_los_sensors = getattr(sensors_system, "check_line_of_sight", None)
++    orig_los_core = getattr(engine_core, "check_line_of_sight", None)
+     orig_brains = engine.brains.forward
+     orig_combat = engine.combat.process_abilities
+     orig_ballistics = engine.ballistics.resolve_ballistic_hits
+@@ -185,8 +185,10 @@ def run_profile(
+     engine._step_internal = _build_instrumented_step(engine_core.RealisticBattleEngine._step_internal)
+     engine.spatial.resolve_obstacle_collisions = make_wrapper("spatial.resolve_obstacle_collisions", orig_spatial_col)
+     spatial_system.check_line_of_sight = wrapped_los
+-    sensors_system.check_line_of_sight = wrapped_los
+-    engine_core.check_line_of_sight = wrapped_los
++    if orig_los_sensors is not None:
++        sensors_system.check_line_of_sight = wrapped_los
++    if orig_los_core is not None:
++        engine_core.check_line_of_sight = wrapped_los
+     engine.brains.forward = make_wrapper("brains.forward", orig_brains)
+     engine.combat.process_abilities = make_wrapper("combat.process_abilities", orig_combat)
+     engine.ballistics.resolve_ballistic_hits = make_wrapper("ballistics.resolve_ballistic_hits", orig_ballistics)
+@@ -216,8 +218,10 @@ def run_profile(
+         engine._step_internal = orig_step_internal
+         engine.spatial.resolve_obstacle_collisions = orig_spatial_col
+         spatial_system.check_line_of_sight = orig_los
+-        sensors_system.check_line_of_sight = orig_los_sensors
+-        engine_core.check_line_of_sight = orig_los_core
++        if orig_los_sensors is not None:
++            sensors_system.check_line_of_sight = orig_los_sensors
++        if orig_los_core is not None:
++            engine_core.check_line_of_sight = orig_los_core
+         engine.brains.forward = orig_brains
+         engine.combat.process_abilities = orig_combat
+         engine.ballistics.resolve_ballistic_hits = orig_ballistics
