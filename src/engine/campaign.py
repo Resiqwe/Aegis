@@ -13,16 +13,12 @@ import numpy as np
 import torch
 
 from ai_brains import CLASS_COSTS, CLASS_JUGGERNAUT
-from config import CLASS_NAMES
+from config import CLASS_NAMES, DOCTRINE_HOLD, DOCTRINE_RUSH, DOCTRINE_SKIRMISH
 from engine.staging_buffer import SimulationStagingBuffer
 from scenarios import SCENARIO_CITADEL, SCENARIO_NAMES
 
 if TYPE_CHECKING:
     from engine_core import RealisticBattleEngine
-
-DOCTRINE_RUSH = 1
-DOCTRINE_HOLD = 2
-DOCTRINE_SKIRMISH = 3
 
 
 def start_new_operation(eng: RealisticBattleEngine, restart_all: bool = False) -> None:

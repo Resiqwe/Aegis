@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from config import CLASS_NAMES
-from scenarios import MapScenario, compute_cpu_flow_field, SCENARIO_DOMINATION, SCENARIO_CITADEL, SCENARIO_NAMES
+from scenarios import MapScenario, compute_cpu_flow_field, SCENARIO_DOMINATION
 from engine.staging_buffer import SimulationStagingBuffer
 from engine.tick_context import TickContext
 from engine.sensors_system import run_sensors_and_brain
@@ -36,14 +36,12 @@ from engine.snapshot_format import (
     format_battle_snapshot,
     format_inspected_unit,
 )
-from engine.spatial_system import SpatialSystem, check_line_of_sight
+from engine.spatial_system import SpatialSystem
 from engine.ballistics_system import VectorizedBallisticsSystem
 from engine.combat_system import CombatSystem, run_weapons_and_firing
 from engine.objectives_system import ObjectivesSystem, run_post_commit_and_objectives
 from ai_brains import (
-    NeuroEvolutionPool,
-    CLASS_GRUNT, CLASS_MEDIC, CLASS_SNIPER, CLASS_JUGGERNAUT,
-    CLASS_COSTS, UNLOCK_XP
+    NeuroEvolutionPool
 )
 
 FACTION_COLORS = [

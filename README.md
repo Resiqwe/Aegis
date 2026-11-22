@@ -18,7 +18,7 @@ graph TD
 
     EngineCore --> Ballistics["engine/ballistics_system.py<br/>(Zónový rozpad, Úhlový pancíř)"]
     EngineCore --> Spatial["engine/spatial_system.py<br/>(Grid LoS, Ray-AABB, Kolize)"]
-    EngineCore --> AIBrains["ai_brains.py<br/>(14 -> 64 -> 64 -> 7 Hierarchický MLP)"]
+    EngineCore --> AIBrains["ai_brains.py<br/>(14 -> 24 -> 16 -> 7 Hierarchický MLP)"]
     EngineCore --> Scenarios["scenarios.py<br/>(Domination, Citadel, Chasm)"]
 
     AIBrains --> GeneralBrain["FactionGeneralBrain<br/>(Strategický nákup armády a techů dle ROI)"]

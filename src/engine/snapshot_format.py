@@ -14,12 +14,10 @@ import numpy as np
 import torch
 
 from ai_brains import CLASS_COSTS, UNLOCK_XP
-from config import CLASS_NAMES
+from config import CLASS_NAMES, STATE_NAMES
 
 if TYPE_CHECKING:
     from engine_core import RealisticBattleEngine
-
-STATE_NAMES = ("IDLE", "ENGAGE", "COVER_RETREAT", "SNIPER_LOCK", "TRIAGE_HEAL", "FORTRESS_PUSH")
 
 
 def extract_raw_telemetry_state(

@@ -39,16 +39,15 @@ import pygame
 
 from src.scenarios import SCENARIO_NAMES
 from src.engine_core import RealisticBattleEngine, DOCTRINE_LIST
-from src.ai_brains import CLASS_MEDIC
 from src.telemetry_logger import TelemetryManager
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
 import battlefield_renderer as bf_render
 from src.profiler import render_prof
 from src.ui.widgets import (
-    FACTION_META, BG_DARK, PANEL_BG, PANEL_HEADER, BORDER_COL,
-    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_PINK, TEXT_MAIN, TEXT_DIM,
-    safe_rgb, ModernTextCache, draw_hud_button as _draw_hud_button,
+    FACTION_META, BG_DARK, PANEL_BG, BORDER_COL,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_PINK, TEXT_DIM,
+    ModernTextCache, draw_hud_button as _draw_hud_button,
 )
 from src.ui.hud_inspector import draw_right_dock as _draw_right_dock
 
@@ -514,7 +513,7 @@ class OptimizedTacticalHUD:
         dock_rect = pygame.Rect(vp_w + 14, top_h + 6, dock_w - 4, vp_h)
 
         t_ui0 = time.perf_counter()
-        self._draw_top_bar(W, top_h)
+        self._draw_top_bar(W, top_h, state)
         t_ui1 = time.perf_counter()
 
         t_world0 = time.perf_counter()
@@ -533,12 +532,13 @@ class OptimizedTacticalHUD:
         t_flip1 = time.perf_counter()
         render_prof.record("flip_ms", (t_flip1 - t_flip0) * 1000.0)
 
-    def _draw_top_bar(self, W: int, top_h: int):
+    def _draw_top_bar(self, W: int, top_h: int, state: dict | None = None):
         pygame.draw.rect(self.screen, PANEL_BG, (0, 0, W, top_h))
         pygame.draw.line(self.screen, BORDER_COL, (0, top_h - 1), (W, top_h - 1), 1)
 
-        sec = int(self.engine.operation_time_sec)
-        rem_sec = max(0, int(self.engine.MAX_OPERATION_DURATION - self.engine.operation_time_sec))
+        op_time = float(state.get("operation_time_sec", 0.0)) if state is not None else float(self.engine.operation_time_sec)
+        sec = int(op_time)
+        rem_sec = max(0, int(self.engine.MAX_OPERATION_DURATION - op_time))
         time_str = f"{sec // 60:02d}:{sec % 60:02d} (Do evoluce: {rem_sec:02d}s)"
 
         # 1. Levá zóna: Kompaktní informační panel
@@ -718,7 +718,7 @@ class OptimizedTacticalHUD:
 
         if getattr(self, "_owns_worker", True):
             self.worker.stop()
-        if hasattr(self.telemetry, "shutdown"):
+        if not self.embedded and hasattr(self.telemetry, "shutdown"):
             self.telemetry.shutdown(wait=True)
         self.telemetry.flush_spatial_parquet()
         if not self.embedded:

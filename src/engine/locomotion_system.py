@@ -17,21 +17,20 @@ from typing import TYPE_CHECKING
 import torch
 
 from ai_brains import CLASS_JUGGERNAUT, CLASS_MEDIC, CLASS_SNIPER
+from config import (
+    DOCTRINE_HOLD,
+    DOCTRINE_RUSH,
+    STATE_COVER_RETREAT,
+    STATE_ENGAGE,
+    STATE_FORTRESS_PUSH,
+    STATE_IDLE,
+    STATE_SNIPER_LOCK,
+    STATE_TRIAGE_HEAL,
+)
 
 if TYPE_CHECKING:
     from engine.tick_context import TickContext
     from engine_core import RealisticBattleEngine
-
-# Konstanty stavového registru a doktrín (shodné s engine_core)
-DOCTRINE_RUSH = 1
-DOCTRINE_HOLD = 2
-
-STATE_IDLE = 0
-STATE_ENGAGE = 1
-STATE_COVER_RETREAT = 2
-STATE_SNIPER_LOCK = 3
-STATE_TRIAGE_HEAL = 4
-STATE_FORTRESS_PUSH = 5
 
 
 def run_locomotion(eng: RealisticBattleEngine, ctx: TickContext) -> None:

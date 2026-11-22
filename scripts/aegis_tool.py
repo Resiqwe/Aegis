@@ -7,6 +7,7 @@ Použití:
   python scripts/aegis_tool.py profile [--compact] [--ticks 200] [--units 800] [--json]
   python scripts/aegis_tool.py bench [--save-baseline] [--compare] [--ticks 500] [--json]
   python scripts/aegis_tool.py snaps list | inspect <file.pt> | diff <a.pt> <b.pt>
+  python scripts/aegis_tool.py probe [--auto | --pid <PID>] [--interval 250] [--duration <s>]
   python scripts/aegis_tool.py health
 """
 
@@ -64,6 +65,14 @@ def main() -> int:
         except Exception:
             pass
 
+    # Přímé delegování podpříkazu `probe` na samostatný devtools/hw_probe.py (včetně --help a čistého Ctrl+C)
+    if len(sys.argv) >= 2 and sys.argv[1] == "probe":
+        probe_script = ROOT / "devtools" / "hw_probe.py"
+        try:
+            return subprocess.run([sys.executable, str(probe_script), *sys.argv[2:]]).returncode
+        except KeyboardInterrupt:
+            return 0
+
     parser = argparse.ArgumentParser(prog="aegis_tool", description="Aegis Engine Diagnostic & Agent Tooling Kit")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -108,6 +117,9 @@ def main() -> int:
     ps_diff.add_argument("path_a", type=str)
     ps_diff.add_argument("path_b", type=str)
     ps_diff.add_argument("--json", action="store_true")
+
+    # probe (delegováno výše před parse_args, zde pro zobrazení v --help)
+    sub.add_parser("probe", add_help=False, help="Neinvazivní per-process HW sonda (deleguje na devtools/hw_probe.py)")
 
     # health
     sub.add_parser("health", help="Kompletní pre-commit gate (py_compile + xray + tests + git)")

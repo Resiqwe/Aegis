@@ -13,54 +13,6 @@ class ObjectivesSystem:
         self.device = device
         self._lock = threading.RLock()
 
-    def update_control_nodes(
-        self,
-        dt: float,
-        nodes_gpu: torch.Tensor,
-        node_control_points: torch.Tensor,
-        pos: torch.Tensor,
-        teams: torch.Tensor,
-        alive: torch.Tensor,
-        n_factions: int = 4,
-    ) -> torch.Tensor:
-        """Obsazování strategických nodů podle převahy jednotek v rádiusu."""
-        if nodes_gpu.shape[0] == 0:
-            return nodes_gpu
-
-        n_nodes = nodes_gpu.shape[0]
-        for ni in range(n_nodes):
-            nx, ny, nr = nodes_gpu[ni, 0], nodes_gpu[ni, 1], nodes_gpu[ni, 2]
-            dists = torch.hypot(pos[:, 0] - nx, pos[:, 1] - ny)
-            inside = (dists <= nr) & alive
-
-            if inside.any():
-                in_teams = teams[inside].long()
-                cnts = torch.bincount(in_teams, minlength=n_factions)
-                max_cnt = int(torch.max(cnts).item())
-                winners = (cnts == max_cnt).nonzero().squeeze(1)
-
-                if len(winners) == 1 and max_cnt > 0:
-                    dominant_team = int(winners[0].item())
-                    cur_owner = int(nodes_gpu[ni, 3].item())
-                    cur_prog = float(nodes_gpu[ni, 4].item())
-
-                    if cur_owner == dominant_team:
-                        nodes_gpu[ni, 4] = min(1.0, cur_prog + dt * 0.45)
-                    else:
-                        new_prog = cur_prog - dt * 0.55
-                        if new_prog <= 0.0:
-                            nodes_gpu[ni, 3] = float(dominant_team)
-                            nodes_gpu[ni, 4] = 0.05
-                        else:
-                            nodes_gpu[ni, 4] = new_prog
-
-            owner = int(nodes_gpu[ni, 3].item())
-            prog = float(nodes_gpu[ni, 4].item())
-            if owner >= 0 and prog >= 0.85:
-                node_control_points[owner] += dt * 1.5
-
-        return nodes_gpu
-
     def update_gates(
         self,
         dt: float,

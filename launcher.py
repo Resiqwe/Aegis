@@ -42,7 +42,6 @@ except ImportError:
 import glob
 import json
 import time
-import math
 import importlib
 import webbrowser
 
@@ -62,11 +61,9 @@ import hardware_telemetry
 from src.engine.state_bridge import LockFreeStateBridge
 from src.engine.async_runner import AsyncSimulationWorker
 from src.ui.widgets import (
-    BG_VOID, PANEL_SURFACE, PANEL_ELEVATED, CARD_BG, BORDER_SUBTLE, BORDER_FOCUS,
-    TEXT_HEAD, TEXT_BODY, TEXT_MUTED,
-    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_ROSE, ACCENT_PURPLE,
-    FACTION_THEMES, CLASS_COLORS,
-    safe_rgb, ModernTextCache, draw_card as _draw_card, draw_launcher_button as _draw_launcher_button,
+    BG_VOID, PANEL_SURFACE, CARD_BG, BORDER_SUBTLE, TEXT_BODY, TEXT_MUTED,
+    ACCENT_CYAN, ACCENT_AMBER, ACCENT_GREEN, ACCENT_ROSE, FACTION_THEMES, CLASS_COLORS,
+    ModernTextCache, draw_card as _draw_card, draw_launcher_button as _draw_launcher_button,
 )
 from src.ui.launcher_panels import (
     draw_modern_dock as _draw_modern_dock,

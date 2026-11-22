@@ -101,16 +101,6 @@ class SpatialSystem:
         self.device = device or torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.max_los_diag = math.hypot(self.W, self.H)
 
-    def check_los(
-        self,
-        p1: torch.Tensor,
-        p2: torch.Tensor,
-        pillars: torch.Tensor,
-        walls: torch.Tensor,
-        smokes: torch.Tensor,
-    ) -> torch.Tensor:
-        return check_line_of_sight(p1, p2, pillars, walls, smokes)
-
     def resolve_obstacle_collisions(
         self,
         pos: torch.Tensor,

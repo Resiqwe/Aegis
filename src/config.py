@@ -68,16 +68,25 @@ DOCTRINE_HOLD: int = 2
 DOCTRINE_SKIRMISH: int = 3
 DOCTRINE_LIST = ("BALANCED", "RUSH", "HOLD", "SKIRMISH")
 
+# ── Stavový automat jednotek ──────────────────────────────────────────
+STATE_IDLE: int = 0
+STATE_ENGAGE: int = 1
+STATE_COVER_RETREAT: int = 2
+STATE_SNIPER_LOCK: int = 3
+STATE_TRIAGE_HEAL: int = 4
+STATE_FORTRESS_PUSH: int = 5
+STATE_NAMES = ("IDLE", "ENGAGE", "COVER_RETREAT", "SNIPER_LOCK", "TRIAGE_HEAL", "FORTRESS_PUSH")
+
 # ── Technologie (Power-Upy generálů) ─────────────────────────────────
 TECH_NANITES: int = 0     # Pasivní samoléčení (+3.5 HP/s)
-TECH_RADAR: int = 1       # +35 % dosah senzorů a LoS
+TECH_RADAR: int = 1       # +25 % dosah senzorů a LoS
 TECH_SHIELDS: int = 2     # 100% absorpce 1. smrtícího zásahu
 TECH_OVERCLOCK: int = 3   # +25 % kapacita zásobníku
 TECH_AEROSOL: int = 4     # +40 % poloměr kouře a maskování
 
 TECH_NAMES = (
     "Nanitová Regenerace (+3.5 HP/s pasivní samoléčení)",
-    "Bojový UAV Radar (+35 % dosah senzorů a LoS)",
+    "Bojový UAV Radar (+25 % dosah senzorů a LoS)",
     "Kinetické Štíty (100% absorpce 1. smrtícího zásahu)",
     "Magazínový Overclock (+25 % kapacita zásobníku)",
     "Termální Aerosol (+40 % poloměr kouře a maskování)",
